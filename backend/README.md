@@ -57,6 +57,56 @@ MySQL et ne remplace ni ne supprime les tables déjà présentes dans `ebook`.
    L’autorisation HTTP sans TLS est limitée au manifeste Android de debug ;
    utilisez exclusivement HTTPS pour une version distribuée.
 
+## Hébergement gratuit pour tester l’application
+
+Render ne propose pas de base MySQL gratuite. Son PostgreSQL gratuit expire au
+bout de 30 jours et nécessiterait de réécrire les requêtes MySQL du backend.
+Pour conserver ce backend, le Blueprint `render.yaml` déploie l’API sur Render
+Free et utilise TiDB Cloud Starter en mode MySQL-compatible pour la base.
+L’offre TiDB Starter inclut une enveloppe gratuite soumise à des quotas ; voir
+les [limites Render Free](https://render.com/docs/free) et les
+[quotas TiDB Starter](https://docs.pingcap.com/tidbcloud/select-cluster-tier/).
+
+1. Créez une instance TiDB Cloud Starter **MySQL-compatible**, activez son
+   endpoint public et notez son hôte, son port, sa base et son utilisateur.
+   Dans la liste d’accès réseau de TiDB, autorisez les plages IP sortantes
+   affichées dans **Connect > Outbound** sur le service Render ; n’ouvrez pas
+   la base à toutes les adresses IP. TiDB impose TLS.
+2. Depuis le dépôt GitHub lié à Render, créez un Blueprint et sélectionnez
+   `render.yaml`. Dans les variables `MYSQL_HOST`, `MYSQL_DATABASE`,
+   `MYSQL_USER` et `MYSQL_PASSWORD` du service, entrez les valeurs TiDB.
+   Laissez `MYSQL_PORT=4000` et `MYSQL_SSL=true`. Render génère le `JWT_SECRET`.
+   Définissez séparément `FEDAPAY_SECRET_KEY` avec une clé sandbox, si les
+   paiements sont nécessaires.
+3. Après le premier déploiement, exécutez depuis la racine du dépôt :
+
+   ```powershell
+   .\backend\scripts\copy-local-data.ps1
+   ```
+
+   Le script lit la base locale configurée dans `backend/.env`, demande les
+   identifiants TiDB en saisie masquée et copie les comptes, livres, paramètres
+   et commandes sans afficher leur contenu. Il refuse de remplacer des données
+   déjà présentes dans la base cloud. Sauvegardez vos données avant cette
+   opération. Le fichier `platform_users.sql` est une sauvegarde contenant des
+   données personnelles et des empreintes de mots de passe : gardez-le local et
+   ne le poussez pas sur GitHub. Les références aux PDF/DOCX sont copiées, mais
+   pas les fichiers eux-mêmes ; leur stockage doit être configuré séparément.
+4. Copiez l’URL publique HTTPS du service Render et générez l’APK en remplaçant
+   l’adresse par exemple ci-dessous :
+
+   ```powershell
+   flutter build apk --release --dart-define=API_BASE_URL=https://VOTRE-API.onrender.com/api
+   ```
+
+   L’APK se trouvera dans `build\app\outputs\flutter-apk\app-release.apk`.
+
+Render Free met le service en veille après une période d’inactivité ; le premier
+réveil peut prendre environ une minute. Son disque local n’est pas persistant :
+les PDF/DOCX téléversés sur l’API ne doivent pas y être conservés à long terme.
+Utilisez un stockage de fichiers persistant avant de compter sur le téléchargement
+des livres après un redémarrage ou une mise en veille.
+
 ## Paiements FedaPay
 
 Les paiements de livres utilisent FedaPay. Pour tester en sandbox, définissez

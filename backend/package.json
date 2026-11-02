@@ -9,6 +9,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "db:migrate": "node src/db/migrate.js",
+    "db:copy-to-cloud": "node src/scripts/copy-local-data.js",
     "admin:create": "node src/scripts/create-admin.js",
     "test": "node --test"
   },

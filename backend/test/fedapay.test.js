@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createFedaPayClient } from '../src/payments/fedapay.js';
-import { loadServerConfig } from '../src/config.js';
+import { loadDatabaseConfig, loadServerConfig } from '../src/config.js';
 
 test('FedaPay sandbox creates a test transaction and returns a secure checkout URL', async () => {
   const requests = [];
@@ -101,5 +101,13 @@ test('blank optional FedaPay environment variables do not prevent API startup', 
       FEDAPAY_ENVIRONMENT: 'live',
     }),
     /FEDAPAY_ENVIRONMENT/,
+  );
+});
+
+test('database TLS is disabled locally by default and can be enabled for TiDB', () => {
+  assert.equal(loadDatabaseConfig({ MYSQL_USER: 'test' }).MYSQL_SSL, false);
+  assert.equal(
+    loadDatabaseConfig({ MYSQL_USER: 'test', MYSQL_SSL: 'true' }).MYSQL_SSL,
+    true,
   );
 });

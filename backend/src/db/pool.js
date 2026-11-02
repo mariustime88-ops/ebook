@@ -8,6 +8,7 @@ export function createPool(config) {
     user: config.MYSQL_USER,
     password: config.MYSQL_PASSWORD,
     charset: 'utf8mb4',
+    ...(config.MYSQL_SSL ? { ssl: { rejectUnauthorized: true } } : {}),
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,

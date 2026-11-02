@@ -7,6 +7,8 @@ const databaseSchema = z.object({
   MYSQL_DATABASE: z.string().min(1).default('ebook'),
   MYSQL_USER: z.string().min(1, 'MYSQL_USER est obligatoire.'),
   MYSQL_PASSWORD: z.string().default(''),
+  MYSQL_SSL: z.enum(['true', 'false']).default('false')
+    .transform((value) => value === 'true'),
 });
 
 export function loadDatabaseConfig(env = process.env) {
