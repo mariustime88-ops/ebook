@@ -6,7 +6,7 @@ import { loadServerConfig } from '../src/config.js';
 test('FedaPay sandbox creates a test transaction and returns a secure checkout URL', async () => {
   const requests = [];
   const client = createFedaPayClient({
-    secretKey: 'sandbox-secret',
+    secretKey: 'sk_sandbox_test-secret',
     environment: 'sandbox',
     fetchImpl: async (url, options) => {
       requests.push({ url, options });
@@ -33,7 +33,7 @@ test('FedaPay sandbox creates a test transaction and returns a secure checkout U
     paymentUrl: 'https://checkout.fedapay.com/session',
   });
   assert.equal(requests[0].url, 'https://sandbox-api.fedapay.com/v1/transactions');
-  assert.equal(requests[0].options.headers.Authorization, 'Bearer sandbox-secret');
+  assert.match(requests[0].options.headers.Authorization, /^Bearer sk_sandbox_/);
   const body = JSON.parse(requests[0].options.body);
   assert.equal(body.mode, undefined);
   assert.deepEqual(body.custom_metadata, { order_id: 7 });
@@ -42,7 +42,7 @@ test('FedaPay sandbox creates a test transaction and returns a secure checkout U
 
 test('FedaPay rejects non-HTTPS checkout links', async () => {
   const client = createFedaPayClient({
-    secretKey: 'sandbox-secret',
+    secretKey: 'sk_sandbox_test-secret',
     fetchImpl: async (_url, options) => ({
       ok: true,
       status: 200,
@@ -67,7 +67,7 @@ test('FedaPay rejects non-HTTPS checkout links', async () => {
 test('FedaPay refuses live mode to prevent real charges during sandbox testing', () => {
   assert.throws(
     () => createFedaPayClient({
-      secretKey: 'sandbox-secret',
+      secretKey: 'sk_sandbox_test-secret',
       environment: 'live',
     }),
     /Environnement FedaPay invalide/,
@@ -86,6 +86,14 @@ test('blank optional FedaPay environment variables do not prevent API startup', 
   assert.equal(config.FEDAPAY_SECRET_KEY, undefined);
   assert.equal(config.FEDAPAY_CALLBACK_URL, undefined);
   assert.equal(config.FEDAPAY_ENVIRONMENT, 'sandbox');
+  assert.throws(
+    () => loadServerConfig({
+      MYSQL_USER: 'test',
+      JWT_SECRET: 'test-secret-with-more-than-thirty-two-characters',
+      FEDAPAY_SECRET_KEY: 'sk_live_test-secret',
+    }),
+    /FEDAPAY_SECRET_KEY doit être une clé secrète sandbox/,
+  );
   assert.throws(
     () => loadServerConfig({
       MYSQL_USER: 'test',

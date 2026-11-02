@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:device_preview/device_preview.dart';
 import 'package:file_picker/file_picker.dart';
@@ -690,7 +692,34 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _showBookPreview(Book book) {
+  Future<void> _showPaymentSuccess(Book book) async {
+    if (!mounted) return;
+    setState(() => _selectedTab = 0);
+
+    final openBook = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Paiement réussi'),
+        content: Text(
+          'Votre achat de « ${book.title} » est confirmé. '
+          'Appuyez sur OK pour accéder à votre livre.',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+
+    if (mounted && openBook == true) {
+      _showBookPreview(book, alreadyPaid: true);
+    }
+  }
+
+  void _showBookPreview(Book book, {bool alreadyPaid = false}) {
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -700,7 +729,9 @@ class _HomePageState extends State<HomePage> {
         child: _BookPreviewSheet(
           api: _api,
           book: book,
+          alreadyPaid: alreadyPaid,
           isInLibrary: _libraryBookIds.contains(book.title),
+          onPaymentSucceeded: _showPaymentSuccess,
           onReadDemo: () {
             Navigator.of(context).pop();
             _openReader(book);
@@ -796,27 +827,56 @@ class _BookPreviewSheet extends StatefulWidget {
   const _BookPreviewSheet({
     required this.api,
     required this.book,
+    required this.alreadyPaid,
     required this.isInLibrary,
     required this.onReadDemo,
     required this.onAddDemo,
+    required this.onPaymentSucceeded,
   });
 
   final ApiClient api;
   final Book book;
+  final bool alreadyPaid;
   final bool isInLibrary;
   final VoidCallback onReadDemo;
   final Future<bool> Function() onAddDemo;
+  final Future<void> Function(Book book) onPaymentSucceeded;
 
   @override
   State<_BookPreviewSheet> createState() => _BookPreviewSheetState();
 }
 
-class _BookPreviewSheetState extends State<_BookPreviewSheet> {
+class _BookPreviewSheetState extends State<_BookPreviewSheet>
+    with WidgetsBindingObserver {
   int? _orderId;
   String? _paymentUrl;
   String? _error;
-  bool _isPaid = false;
+  late bool _isPaid;
   bool _isBusy = false;
+  bool _isCheckingPayment = false;
+  bool _paymentSuccessHandled = false;
+  Timer? _paymentPollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _isPaid = widget.alreadyPaid;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _paymentPollTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _orderId != null) {
+      unawaited(_verifyPayment());
+    }
+  }
 
   Future<void> _payOrVerify() async {
     if (_isBusy) return;
@@ -828,11 +888,8 @@ class _BookPreviewSheetState extends State<_BookPreviewSheet> {
       if (_isPaid) {
         await _downloadPurchasedBook();
       } else if (_orderId != null) {
-        final result = await widget.api.verifyPayment(_orderId!);
-        if (result['paid'] == true) {
-          setState(() => _isPaid = true);
-          await _downloadPurchasedBook();
-        } else {
+        final paid = await _verifyPayment();
+        if (!paid && mounted && _error == null) {
           setState(() {
             _error =
                 'Paiement non confirmé. Terminez le paiement, puis réessayez.';
@@ -841,8 +898,7 @@ class _BookPreviewSheetState extends State<_BookPreviewSheet> {
       } else {
         final result = await widget.api.createPaymentCheckout(widget.book.id!);
         if (result['alreadyPaid'] == true) {
-          setState(() => _isPaid = true);
-          await _downloadPurchasedBook();
+          await _completePayment();
         } else {
           final orderId = result['orderId'];
           final paymentUrl = result['paymentUrl'];
@@ -869,6 +925,8 @@ class _BookPreviewSheetState extends State<_BookPreviewSheet> {
             setState(() {
               _error = 'Impossible d’ouvrir la page de paiement. Réessayez.';
             });
+          } else {
+            _startPaymentPolling();
           }
         }
       }
@@ -879,6 +937,66 @@ class _BookPreviewSheetState extends State<_BookPreviewSheet> {
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }
+  }
+
+  Future<bool> _verifyPayment() async {
+    final orderId = _orderId;
+    if (orderId == null || _isCheckingPayment || _paymentSuccessHandled) {
+      return false;
+    }
+
+    _isCheckingPayment = true;
+    try {
+      final result = await widget.api.verifyPayment(orderId);
+      if (result['paid'] == true) {
+        await _completePayment();
+        return true;
+      }
+      if (result['paid'] != false) {
+        throw const ApiException(
+          'Le serveur n’a pas retourné un statut de paiement valide.',
+        );
+      }
+      return false;
+    } on ApiException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+      return false;
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = 'Vérification du paiement impossible : $error');
+      }
+      return false;
+    } finally {
+      _isCheckingPayment = false;
+    }
+  }
+
+  void _startPaymentPolling() {
+    _paymentPollTimer?.cancel();
+    final expiresAt = DateTime.now().add(const Duration(minutes: 2));
+    _paymentPollTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      if (!mounted || DateTime.now().isAfter(expiresAt)) {
+        timer.cancel();
+        if (mounted && !_paymentSuccessHandled) {
+          setState(() {
+            _error =
+                'Le paiement est toujours en attente. Revenez ici et '
+                'appuyez sur « Vérifier mon paiement ».';
+          });
+        }
+        return;
+      }
+      unawaited(_verifyPayment());
+    });
+  }
+
+  Future<void> _completePayment() async {
+    if (_paymentSuccessHandled || !mounted) return;
+    _paymentSuccessHandled = true;
+    _paymentPollTimer?.cancel();
+    setState(() => _isPaid = true);
+    Navigator.of(context).pop();
+    await widget.onPaymentSucceeded(widget.book);
   }
 
   Future<void> _reopenPayment() async {

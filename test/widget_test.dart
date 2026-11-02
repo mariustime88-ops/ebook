@@ -11,6 +11,7 @@ class _FakeApiClient extends ApiClient {
   bool registered = false;
   bool hasExistingSession = true;
   bool catalogueUnavailable = false;
+  bool paymentAlreadyPaid = false;
   String accountType = 'reader';
 
   @override
@@ -89,6 +90,9 @@ class _FakeApiClient extends ApiClient {
 
   @override
   Future<Map<String, dynamic>> createPaymentCheckout(int bookId) async {
+    if (paymentAlreadyPaid) {
+      return {'orderId': 19, 'alreadyPaid': true};
+    }
     throw const ApiException(
       'Le paiement FedaPay n’est pas encore configuré sur le serveur.',
       statusCode: 503,
@@ -160,6 +164,31 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets(
+    'payment success returns home and opens the purchased book on OK',
+    (tester) async {
+      final api = _FakeApiClient()..paymentAlreadyPaid = true;
+      await tester.pumpWidget(_app(api));
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.text('Livre publié').first);
+      await tester.tap(find.text('Livre publié').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Payer avec FedaPay'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Paiement réussi'), findsOneWidget);
+      expect(find.text('Votre prochaine lecture vous attend.'), findsOneWidget);
+
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Paiement réussi'), findsNothing);
+      expect(find.text('Livre publié'), findsWidgets);
+      expect(find.text('Télécharger le livre'), findsOneWidget);
+    },
+  );
 
   testWidgets('opens the administration page for a signed-in administrator', (
     tester,

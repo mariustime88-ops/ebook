@@ -538,7 +538,7 @@ export function createApiRouter({
           ?? transaction.metadata?.order_id;
         const isMatchingPayment = String(transaction.id) === String(order.provider_reference)
           && Number(transaction.amount) === Number(order.amount)
-          && (transactionCurrency === undefined || transactionCurrency === order.currency)
+          && transactionCurrency === order.currency
           && (
             metadataOrderId === undefined
             || String(metadataOrderId) === String(order.id)

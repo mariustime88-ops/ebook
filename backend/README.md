@@ -62,7 +62,8 @@ MySQL et ne remplace ni ne supprime les tables déjà présentes dans `ebook`.
 Les paiements de livres utilisent FedaPay. Pour tester en sandbox, définissez
 `FEDAPAY_ENVIRONMENT=sandbox` et ajoutez une **nouvelle clé secrète sandbox**
 dans `FEDAPAY_SECRET_KEY` de `backend/.env`, puis redémarrez l’API. Le projet
-refuse le mode live pour éviter tout débit réel pendant les tests. Pour
+refuse le mode live et toute clé qui ne commence pas par `sk_sandbox_`, afin
+d’éviter tout débit réel pendant les tests. Pour
 enregistrer une nouvelle clé sans l’afficher dans le terminal, exécutez depuis
 le dossier `backend` :
 

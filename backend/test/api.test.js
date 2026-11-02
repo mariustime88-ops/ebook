@@ -358,6 +358,7 @@ test('book listing only returns approved catalogue entries', async (t) => {
           id: 'transaction-19',
           status: 'approved',
           amount: 1000,
+          currency: { iso: 'XOF' },
           custom_metadata: { order_id: 19 },
         }),
       },
@@ -377,7 +378,8 @@ test('book listing only returns approved catalogue entries', async (t) => {
     assert.deepEqual(updates, [[19, 9]]);
   });
 
-  test('payment verification leaves an approved transaction with a wrong amount unpaid', async (t) => {
+  test('payment verification leaves an approved transaction with a wrong or missing currency unpaid', async (t) => {
+    let transactionCurrency;
     const app = await startServer(t, {
       execute: async (sql) => {
         if (sql.includes('FROM platform_users WHERE id = ? LIMIT 1')) {
@@ -406,19 +408,22 @@ test('book listing only returns approved catalogue entries', async (t) => {
         getTransaction: async () => ({
           id: 'transaction-19',
           status: 'approved',
-          amount: 10,
-          currency: { iso: 'XOF' },
+          amount: 1000,
+          currency: transactionCurrency,
         }),
       },
     });
     const token = signAccessToken(9, jwtSecret);
 
-    const response = await fetch(`${app.baseUrl}/payments/orders/19`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    for (const currency of [undefined, { iso: 'EUR' }]) {
+      transactionCurrency = currency;
+      const response = await fetch(`${app.baseUrl}/payments/orders/19`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
-    assert.equal(response.status, 200);
-    assert.equal((await response.json()).paid, false);
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).paid, false);
+    }
   });
 
 test('registration accepts an eight-character password', async (t) => {

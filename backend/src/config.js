@@ -28,7 +28,12 @@ const serverSchema = databaseSchema.extend({
   PRIVATE_FILES_DIR: z.string().default('./private-storage'),
   FEDAPAY_SECRET_KEY: z.preprocess(
     (value) => value === '' ? undefined : value,
-    z.string().min(1).optional(),
+    z.string()
+      .regex(
+        /^sk_sandbox_.+/,
+        'FEDAPAY_SECRET_KEY doit être une clé secrète sandbox commençant par sk_sandbox_.',
+      )
+      .optional(),
   ),
   FEDAPAY_ENVIRONMENT: z.literal('sandbox').default('sandbox'),
   FEDAPAY_CALLBACK_URL: z.preprocess(
