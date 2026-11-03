@@ -4,10 +4,17 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import jwt from 'jsonwebtoken';
 import { createApp } from '../src/http/routes.js';
 import { signAccessToken } from '../src/http/auth.js';
 
 const jwtSecret = 'test-secret-with-more-than-thirty-two-characters';
+
+test('access tokens remain valid for 30 days', () => {
+  const payload = jwt.decode(signAccessToken(1, jwtSecret));
+
+  assert.equal(payload.exp - payload.iat, 30 * 24 * 60 * 60);
+});
 
 async function startServer(t, pool, options = {}) {
   const privateFilesDirectory = await mkdtemp(

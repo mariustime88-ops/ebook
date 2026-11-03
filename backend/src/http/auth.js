@@ -10,7 +10,7 @@ export function signAccessToken(userId, secret) {
     subject: String(userId),
     issuer,
     audience,
-    expiresIn: '1h',
+    expiresIn: '30d',
   });
 }
 
