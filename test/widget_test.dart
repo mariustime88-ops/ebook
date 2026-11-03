@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:application_livre/main.dart';
 import 'package:application_livre/api_client.dart';
@@ -12,6 +11,8 @@ class _FakeApiClient extends ApiClient {
   bool hasExistingSession = true;
   bool catalogueUnavailable = false;
   bool paymentAlreadyPaid = false;
+  bool resetRequested = false;
+  String updatedEmail = 'reader@example.test';
   String accountType = 'reader';
 
   @override
@@ -103,8 +104,37 @@ class _FakeApiClient extends ApiClient {
   Future<List<Map<String, dynamic>>> authorBooks() async => [];
 
   @override
+  Future<List<Map<String, dynamic>>> purchasedBooks() async => [];
+
+  @override
+  Future<Map<String, dynamic>> requestPasswordReset(String email) async {
+    resetRequested = true;
+    return {
+      'message': 'Si cette adresse possède un compte, un lien a été envoyé.',
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> updateProfile({
+    required String currentPassword,
+    String? email,
+    String? newPassword,
+  }) async {
+    updatedEmail = email ?? updatedEmail;
+    return {
+      'user': {
+        'id': 1,
+        'email': updatedEmail,
+        'displayName': 'Lecteur test',
+        'role': accountType,
+        'status': 'active',
+      },
+    };
+  }
+
+  @override
   Future<List<Map<String, dynamic>>> adminBooks({
-    String status = 'pending',
+    String status = 'approved',
   }) async => [];
 
   @override
@@ -121,10 +151,6 @@ ApplicationLivre _app([ApiClient? apiClient]) =>
     ApplicationLivre(apiClient: apiClient ?? _FakeApiClient());
 
 void main() {
-  setUp(() {
-    SharedPreferences.setMockInitialValues({});
-  });
-
   testWidgets('restores a signed-in reader to the discovery page', (
     tester,
   ) async {
@@ -132,12 +158,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Votre prochaine lecture vous attend.'), findsOneWidget);
-    expect(
-      find.text(
-        'Catalogue chargé depuis le serveur. Les achats sont testés en mode sandbox FedaPay.',
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('Catalogue chargé depuis le serveur.'), findsOneWidget);
     expect(find.text('Livre publié'), findsWidgets);
   });
 
@@ -199,7 +220,7 @@ void main() {
 
     expect(find.text('Administration'), findsWidgets);
     expect(find.text('Comptes auteurs à valider (0)'), findsOneWidget);
-    expect(find.text('Livres à modérer (0)'), findsOneWidget);
+    expect(find.text('Livres publiés (0)'), findsOneWidget);
     expect(find.text('Chiffres clés'), findsNothing);
     expect(find.textContaining('Ventes par devise'), findsNothing);
     expect(
@@ -237,7 +258,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Votre bibliothèque'), findsOneWidget);
-    expect(find.textContaining('hors connexion'), findsOneWidget);
+    expect(find.textContaining('achetés apparaîtront'), findsOneWidget);
 
     await tester.tap(find.text('Découvrir les livres'));
     await tester.pumpAndSettle();
@@ -245,56 +266,29 @@ void main() {
     expect(find.text('Votre prochaine lecture vous attend.'), findsOneWidget);
   });
 
-  testWidgets('adds a sample book to the library and opens the reader', (
+  testWidgets('does not show sample books when the catalogue is unavailable', (
     tester,
   ) async {
     final api = _FakeApiClient()..catalogueUnavailable = true;
     await tester.pumpWidget(_app(api));
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Le secret des pages').first);
-    await tester.tap(find.text('Le secret des pages').first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Ajouter à ma bibliothèque (démo)'));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Ma bibliothèque'));
-    await tester.pumpAndSettle();
-    expect(find.text('Votre bibliothèque'), findsOneWidget);
-    expect(find.text('Le secret des pages'), findsOneWidget);
-
-    await tester.tap(find.text('Le secret des pages'));
-    await tester.pumpAndSettle();
-    expect(find.text('EXTRAIT DE DÉMONSTRATION'), findsOneWidget);
-    expect(
-      find.textContaining('Le chiffrement, le DRM et la synchronisation'),
-      findsOneWidget,
-    );
+    expect(find.text('Livre publié'), findsNothing);
+    expect(find.text('Le secret des pages'), findsNothing);
+    expect(find.text('Les chemins du matin'), findsNothing);
+    expect(find.text('La maison des mots'), findsNothing);
+    expect(find.text('Catalogue indisponible.'), findsOneWidget);
   });
 
-  testWidgets('restores the library from local preferences', (tester) async {
-    SharedPreferences.setMockInitialValues({
-      'libraryBookIds': ['Les chemins du matin'],
-    });
-
-    await tester.pumpWidget(_app());
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Ma bibliothèque'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Les chemins du matin'), findsOneWidget);
-  });
-
-  testWidgets('filters the sample books by title', (tester) async {
-    final api = _FakeApiClient()..catalogueUnavailable = true;
+  testWidgets('filters books returned by the online catalogue', (tester) async {
+    final api = _FakeApiClient();
     await tester.pumpWidget(_app(api));
     await tester.pumpAndSettle();
 
     await tester.enterText(find.byType(TextField), 'secret');
     await tester.pumpAndSettle();
 
-    expect(find.text('Le secret des pages'), findsNWidgets(2));
-    expect(find.text('Les chemins du matin'), findsNothing);
+    expect(find.text('Livre publié'), findsNothing);
   });
 
   testWidgets('registers a reader and loads the server catalogue', (
@@ -364,6 +358,53 @@ void main() {
 
     expect(find.text('Connexion'), findsOneWidget);
     expect(backgroundImage(), findsOneWidget);
+  });
+
+  testWidgets('requests a password reset from the login screen', (
+    tester,
+  ) async {
+    final api = _FakeApiClient()..hasExistingSession = false;
+    await tester.pumpWidget(_app(api));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Se connecter'));
+    await tester.tap(find.text('Se connecter'));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Mot de passe oublié ?'));
+    await tester.tap(find.text('Mot de passe oublié ?'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'reader@example.test');
+    await tester.tap(find.text('Envoyer le lien'));
+    await tester.pumpAndSettle();
+
+    expect(api.resetRequested, isTrue);
+    expect(find.textContaining('un lien a été envoyé'), findsOneWidget);
+  });
+
+  testWidgets('updates the profile email after confirming current password', (
+    tester,
+  ) async {
+    final api = _FakeApiClient();
+    await tester.pumpWidget(_app(api));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Profil'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Modifier mon e-mail ou mon mot de passe'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byType(TextFormField).at(0),
+      'new-reader@example.test',
+    );
+    await tester.enterText(
+      find.byType(TextFormField).at(1),
+      'current-password',
+    );
+    await tester.tap(find.text('Enregistrer'));
+    await tester.pumpAndSettle();
+
+    expect(api.updatedEmail, 'new-reader@example.test');
+    expect(find.text('new-reader@example.test'), findsOneWidget);
   });
 
   testWidgets('requires at least eight characters at registration', (

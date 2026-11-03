@@ -1,15 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:device_preview/device_preview.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'api_client.dart';
 
 void main() {
-  DevicePreview.enable();
   runApp(const ApplicationLivre());
 }
 
@@ -49,58 +46,13 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  static const _books = [
-    Book(
-      title: 'Le secret des pages',
-      author: 'A. Kouamé',
-      color: Color(0xFFB66B4D),
-      content: [
-        'Quand Aïcha ouvrit le livre trouvé dans le grenier, une feuille '
-            'glissa entre ses doigts. Une phrase y était tracée à l’encre '
-            'bleue : « Les histoires savent toujours retrouver leur chemin. »',
-        'Elle reconnut l’écriture de sa grand-mère. Depuis des années, '
-            'personne n’avait parlé de ce carnet, et pourtant chaque page '
-            'semblait attendre d’être lue.',
-        'Au-dehors, la pluie dessinait des chemins sur les vitres. Aïcha '
-            's’installa près de la lampe et tourna la page suivante.',
-      ],
-    ),
-    Book(
-      title: 'Les chemins du matin',
-      author: 'M. Diallo',
-      color: Color(0xFF62745B),
-      content: [
-        'Le jour se levait à peine lorsque Sami prit la route du marché. '
-            'L’air frais sentait la terre humide et le pain chaud.',
-        'Au détour du sentier, il retrouva Mariam qui portait un panier '
-            'd’oranges. Ils décidèrent de faire le chemin ensemble.',
-        'À mesure que le soleil montait, le village s’éveillait. La journée '
-            'promettait d’être longue, mais personne ne semblait pressé.',
-      ],
-    ),
-    Book(
-      title: 'La maison des mots',
-      author: 'S. Mensah',
-      color: Color(0xFF52667D),
-      content: [
-        'Dans la rue des manguiers, une petite maison abritait des livres '
-            'venus de partout. On y entrait pour lire, et l’on en ressortait '
-            'toujours avec une question nouvelle.',
-        'Nina y passait ses mercredis. Elle aimait surtout les récits qui '
-            'commençaient par une porte entrouverte.',
-        'Un après-midi, elle en trouva une derrière les étagères. De l’autre '
-            'côté, une voix l’invitait à choisir son histoire.',
-      ],
-    ),
-  ];
-
   final _searchController = TextEditingController();
   late final ApiClient _api;
   bool _ownsApi = false;
   String _searchText = '';
   int _selectedTab = 0;
-  Set<String> _libraryBookIds = {};
-  bool _isLoadingLibrary = true;
+  List<Book> _libraryBooks = [];
+  bool _isLoadingLibrary = false;
   String? _libraryError;
   Map<String, dynamic>? _currentUser;
   bool _isRestoringSession = true;
@@ -114,7 +66,6 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _api = widget.apiClient ?? ApiClient();
     _ownsApi = widget.apiClient == null;
-    _loadLibrary();
     _restoreSession();
   }
 
@@ -199,7 +150,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildDiscoverPage() {
-    final books = (_catalogueBooks ?? _books)
+    final books = (_catalogueBooks ?? <Book>[])
         .where(
           (book) =>
               book.title.toLowerCase().contains(_searchText.toLowerCase()) ||
@@ -248,27 +199,26 @@ class _HomePageState extends State<HomePage> {
           if (_catalogueBooks != null) ...[
             const SizedBox(height: 8),
             const Text(
-              'Catalogue chargé depuis le serveur. Les achats sont testés en mode sandbox FedaPay.',
+              'Catalogue chargé depuis le serveur.',
               style: TextStyle(color: Color(0xFF647660), fontSize: 13),
             ),
           ],
           const SizedBox(height: 20),
           _buildLibraryBanner(),
           const SizedBox(height: 28),
-          _buildSectionTitle(
-            _catalogueBooks == null ? 'À découvrir' : 'Livres approuvés',
-            _catalogueBooks == null ? 'Démo' : 'En ligne',
-          ),
+          _buildSectionTitle('Livres disponibles', 'En ligne'),
           const SizedBox(height: 14),
-          if (_catalogueBooks != null && books.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24),
-              child: Text('Aucun livre approuvé ne correspond à la recherche.'),
+          if (_isLoadingCatalogue && _catalogueBooks == null)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: CircularProgressIndicator(),
+              ),
             )
           else if (books.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 24),
-              child: Text('Aucun livre ne correspond à votre recherche.'),
+              child: Text('Aucun livre en ligne ne correspond à la recherche.'),
             )
           else
             SizedBox(
@@ -284,15 +234,9 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           const SizedBox(height: 22),
-          Text(
-            _catalogueBooks == null
-                ? 'Les livres affichés sont des exemples temporaires.'
-                : 'Après paiement confirmé par FedaPay, le fichier original est téléchargeable.',
-            style: TextStyle(
-              color: Color(0xFF77766F),
-              fontSize: 13,
-              fontStyle: FontStyle.italic,
-            ),
+          const Text(
+            'Après confirmation du paiement, le fichier original est disponible dans votre bibliothèque.',
+            style: TextStyle(color: Color(0xFF77766F), fontSize: 13),
           ),
         ],
       ),
@@ -461,10 +405,7 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
-    final books = _books
-        .where((book) => _libraryBookIds.contains(book.title))
-        .toList();
-    if (books.isNotEmpty) {
+    if (_libraryBooks.isNotEmpty) {
       return ListView(
         padding: const EdgeInsets.fromLTRB(20, 24, 20, 28),
         children: [
@@ -478,11 +419,11 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'Vos livres de démonstration restent disponibles sur cet appareil.',
+            'Retrouvez ici les livres que vous avez achetés.',
             style: TextStyle(color: Color(0xFF696B64), height: 1.4),
           ),
           const SizedBox(height: 18),
-          for (final book in books) ...[
+          for (final book in _libraryBooks) ...[
             Card(
               color: Colors.white,
               child: ListTile(
@@ -490,25 +431,17 @@ class _HomePageState extends State<HomePage> {
                   horizontal: 14,
                   vertical: 6,
                 ),
-                leading: Container(
-                  width: 44,
-                  height: 58,
-                  decoration: BoxDecoration(
-                    color: book.color,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Icon(Icons.auto_stories, color: Colors.white),
-                ),
+                leading: _BookCover(book: book, width: 44, height: 58),
                 title: Text(
                   book.title,
                   style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
                 subtitle: Text(book.author),
-                onTap: () => _openReader(book),
+                onTap: () => _showBookPreview(book, alreadyPaid: true),
                 trailing: IconButton(
-                  tooltip: 'Retirer ${book.title} de ma bibliothèque',
-                  onPressed: () => _removeBookFromLibrary(book),
-                  icon: const Icon(Icons.delete_outline),
+                  tooltip: 'Télécharger ${book.title}',
+                  onPressed: () => _showBookPreview(book, alreadyPaid: true),
+                  icon: const Icon(Icons.download_outlined),
                 ),
               ),
             ),
@@ -520,7 +453,7 @@ class _HomePageState extends State<HomePage> {
     return _EmptyPage(
       icon: Icons.menu_book_outlined,
       title: 'Votre bibliothèque',
-      message: 'Les livres que vous ajouterez seront réunis ici et pourront ensuite être préparés pour la lecture hors connexion.',
+      message: 'Les livres achetés apparaîtront ici.',
       buttonLabel: 'Découvrir les livres',
       onPressed: () => setState(() => _selectedTab = 0),
     );
@@ -575,6 +508,11 @@ class _HomePageState extends State<HomePage> {
         Text(user['email'] as String? ?? '', textAlign: TextAlign.center),
         const SizedBox(height: 8),
         Center(child: Chip(label: Text(_roleLabel(role)))),
+        ListTile(
+          leading: const Icon(Icons.manage_accounts_outlined),
+          title: const Text('Modifier mon e-mail ou mon mot de passe'),
+          onTap: _editProfile,
+        ),
         if (_sessionError != null)
           ListTile(
             leading: const Icon(Icons.warning_amber, color: Colors.orange),
@@ -603,6 +541,7 @@ class _HomePageState extends State<HomePage> {
     try {
       if (await _api.readToken() == null) {
         if (mounted) setState(() => _isRestoringSession = false);
+        await _loadCatalogue();
         return;
       }
       final result = await _api.currentUser();
@@ -621,6 +560,7 @@ class _HomePageState extends State<HomePage> {
         _sessionError = error.message;
         _isRestoringSession = false;
       });
+      await _loadCatalogue();
       return;
     } catch (error) {
       if (!mounted) return;
@@ -628,9 +568,11 @@ class _HomePageState extends State<HomePage> {
         _sessionError = 'Session indisponible : $error';
         _isRestoringSession = false;
       });
+      await _loadCatalogue();
       return;
     }
-    if (_currentUser?['role'] != 'admin') await _loadCatalogue();
+    await _loadCatalogue();
+    if (_currentUser?['role'] != 'admin') await _loadLibrary();
   }
 
   Future<void> _acceptAuthenticatedUser(Map<String, dynamic> user) async {
@@ -641,7 +583,8 @@ class _HomePageState extends State<HomePage> {
       _sessionError = null;
       _selectedTab = isAdmin ? 1 : 0;
     });
-    if (!isAdmin) await _loadCatalogue();
+    await _loadCatalogue();
+    if (!isAdmin) await _loadLibrary();
   }
 
   Future<void> _openAuthentication() async {
@@ -661,6 +604,7 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _currentUser = null;
       _catalogueBooks = null;
+      _libraryBooks = [];
       _selectedTab = 0;
     });
   }
@@ -695,6 +639,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _showPaymentSuccess(Book book) async {
     if (!mounted) return;
     setState(() => _selectedTab = 0);
+    await _loadLibrary();
+    if (!mounted) return;
 
     final openBook = await showDialog<bool>(
       context: context,
@@ -730,95 +676,59 @@ class _HomePageState extends State<HomePage> {
           api: _api,
           book: book,
           alreadyPaid: alreadyPaid,
-          isInLibrary: _libraryBookIds.contains(book.title),
           onPaymentSucceeded: _showPaymentSuccess,
-          onReadDemo: () {
-            Navigator.of(context).pop();
-            _openReader(book);
-          },
-          onAddDemo: () => _addBookToLibrary(book),
         ),
       ),
     );
   }
 
   Future<void> _loadLibrary() async {
+    if (_currentUser == null || _currentUser?['role'] == 'admin') {
+      if (mounted) {
+        setState(() {
+          _libraryBooks = [];
+          _isLoadingLibrary = false;
+          _libraryError = null;
+        });
+      }
+      return;
+    }
     setState(() {
       _isLoadingLibrary = true;
       _libraryError = null;
     });
 
     try {
-      final preferences = await SharedPreferences.getInstance();
-      final savedIds = preferences.getStringList('libraryBookIds') ?? [];
-      final validIds = savedIds
-          .where((id) => _books.any((book) => book.title == id))
-          .toSet();
+      final result = await _api.purchasedBooks();
       if (!mounted) return;
       setState(() {
-        _libraryBookIds = validIds;
+        _libraryBooks = result.map(Book.fromApi).toList();
         _isLoadingLibrary = false;
       });
-    } catch (error) {
+    } on ApiException catch (error) {
       if (!mounted) return;
       setState(() {
-        _libraryError = 'Erreur lors du chargement : $error';
+        _libraryError = error.message;
         _isLoadingLibrary = false;
       });
     }
   }
 
-  Future<void> _saveLibrary(Set<String> bookIds) async {
-    final preferences = await SharedPreferences.getInstance();
-    final saved = await preferences.setStringList(
-      'libraryBookIds',
-      bookIds.toList(),
+  Future<void> _editProfile() async {
+    final user = _currentUser;
+    if (user == null) return;
+    final updatedUser = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) =>
+          _EditProfileSheet(api: _api, email: user['email'] as String? ?? ''),
     );
-    if (!saved) {
-      throw StateError('La bibliothèque n’a pas pu être enregistrée.');
-    }
-  }
-
-  Future<bool> _addBookToLibrary(Book book) async {
-    if (_libraryBookIds.contains(book.title)) return true;
-
-    final updatedIds = {..._libraryBookIds, book.title};
-    try {
-      await _saveLibrary(updatedIds);
-      if (!mounted) return false;
-      setState(() => _libraryBookIds = updatedIds);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Livre ajouté à votre bibliothèque.')),
-      );
-      return true;
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Impossible d’ajouter le livre : $error')),
-        );
-      }
-      return false;
-    }
-  }
-
-  Future<void> _removeBookFromLibrary(Book book) async {
-    final updatedIds = {..._libraryBookIds}..remove(book.title);
-    try {
-      await _saveLibrary(updatedIds);
-      if (!mounted) return;
-      setState(() => _libraryBookIds = updatedIds);
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Impossible de retirer le livre : $error')),
-        );
-      }
-    }
-  }
-
-  void _openReader(Book book) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (context) => _ReaderPage(book: book)),
+    if (!mounted || updatedUser == null) return;
+    setState(() => _currentUser = updatedUser);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Votre profil a été mis à jour.')),
     );
   }
 }
@@ -828,18 +738,12 @@ class _BookPreviewSheet extends StatefulWidget {
     required this.api,
     required this.book,
     required this.alreadyPaid,
-    required this.isInLibrary,
-    required this.onReadDemo,
-    required this.onAddDemo,
     required this.onPaymentSucceeded,
   });
 
   final ApiClient api;
   final Book book;
   final bool alreadyPaid;
-  final bool isInLibrary;
-  final VoidCallback onReadDemo;
-  final Future<bool> Function() onAddDemo;
   final Future<void> Function(Book book) onPaymentSucceeded;
 
   @override
@@ -1046,10 +950,8 @@ class _BookPreviewSheetState extends State<_BookPreviewSheet>
           const SizedBox(height: 6),
           Text('Par ${book.author}'),
           const SizedBox(height: 18),
-          Text(
-            book.id == null
-                ? 'Extrait de démonstration. Aucun fichier de livre réel n’est fourni.'
-                : 'Après confirmation du paiement, vous pourrez télécharger le fichier original.',
+          const Text(
+            'Après confirmation du paiement, vous pourrez télécharger le fichier original.',
           ),
           if (book.id != null) ...[
             const SizedBox(height: 12),
@@ -1070,46 +972,25 @@ class _BookPreviewSheetState extends State<_BookPreviewSheet>
           const SizedBox(height: 20),
           SizedBox(
             width: double.infinity,
-            child: book.id != null
-                ? FilledButton.icon(
-                    onPressed: _isBusy ? null : _payOrVerify,
-                    icon: _isBusy
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : Icon(_isPaid ? Icons.download : Icons.payment),
-                    label: Text(
-                      _isBusy
-                          ? 'Vérification...'
-                          : _isPaid
-                          ? 'Télécharger le livre'
-                          : _orderId == null
-                          ? 'Payer avec FedaPay'
-                          : 'Vérifier mon paiement',
-                    ),
-                  )
-                : FilledButton.icon(
-                    onPressed: widget.isInLibrary
-                        ? widget.onReadDemo
-                        : () async {
-                            final added = await widget.onAddDemo();
-                            if (added && context.mounted) {
-                              Navigator.of(context).pop();
-                            }
-                          },
-                    icon: Icon(
-                      widget.isInLibrary
-                          ? Icons.menu_book
-                          : Icons.bookmark_add_outlined,
-                    ),
-                    label: Text(
-                      widget.isInLibrary
-                          ? 'Lire ce livre'
-                          : 'Ajouter à ma bibliothèque (démo)',
-                    ),
-                  ),
+            child: FilledButton.icon(
+              onPressed: _isBusy ? null : _payOrVerify,
+              icon: _isBusy
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(_isPaid ? Icons.download : Icons.payment),
+              label: Text(
+                _isBusy
+                    ? 'Vérification...'
+                    : _isPaid
+                    ? 'Télécharger le livre'
+                    : _orderId == null
+                    ? 'Payer avec FedaPay'
+                    : 'Vérifier mon paiement',
+              ),
+            ),
           ),
           if (_orderId != null && !_isPaid) ...[
             const SizedBox(height: 8),
@@ -1152,6 +1033,7 @@ class _AuthenticationPageState extends State<_AuthenticationPage> {
   bool _isSubmitting = false;
   bool _showPassword = false;
   String? _error;
+  String? _notice;
 
   @override
   void initState() {
@@ -1172,6 +1054,7 @@ class _AuthenticationPageState extends State<_AuthenticationPage> {
     setState(() {
       _isSubmitting = true;
       _error = null;
+      _notice = null;
     });
 
     try {
@@ -1210,12 +1093,14 @@ class _AuthenticationPageState extends State<_AuthenticationPage> {
       if (!mounted) return;
       setState(() {
         _error = error.message;
+        _notice = null;
         _isSubmitting = false;
       });
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _error = 'Une erreur est survenue : $error';
+        _notice = null;
         _isSubmitting = false;
       });
     }
@@ -1438,6 +1323,27 @@ class _AuthenticationPageState extends State<_AuthenticationPage> {
                                   return null;
                                 },
                               ),
+                              if (!_isRegistering)
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: TextButton(
+                                    onPressed: _isSubmitting
+                                        ? null
+                                        : _requestPasswordReset,
+                                    child: const Text('Mot de passe oublié ?'),
+                                  ),
+                                ),
+                              if (_notice != null) ...[
+                                const SizedBox(height: 10),
+                                Text(
+                                  _notice!,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.green.shade800,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
                               if (_error != null) ...[
                                 const SizedBox(height: 14),
                                 Text(
@@ -1540,6 +1446,210 @@ class _AuthenticationPageState extends State<_AuthenticationPage> {
       ),
     );
   }
+
+  Future<void> _requestPasswordReset() async {
+    var emailValue = _email.text.trim();
+    final email = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Réinitialiser le mot de passe'),
+        content: TextFormField(
+          initialValue: emailValue,
+          keyboardType: TextInputType.emailAddress,
+          onChanged: (value) => emailValue = value.trim(),
+          decoration: const InputDecoration(labelText: 'Adresse e-mail'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, emailValue),
+            child: const Text('Envoyer le lien'),
+          ),
+        ],
+      ),
+    );
+    if (email == null || email.isEmpty || !mounted) return;
+
+    setState(() {
+      _isSubmitting = true;
+      _error = null;
+      _notice = null;
+    });
+    try {
+      final result = await widget.api.requestPasswordReset(email);
+      if (!mounted) return;
+      setState(() {
+        _email.text = email;
+        _notice =
+            result['message'] as String? ??
+            'Si cette adresse possède un compte, un lien a été envoyé.';
+        _isSubmitting = false;
+      });
+    } on ApiException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.message;
+        _isSubmitting = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Envoi impossible : $error';
+        _isSubmitting = false;
+      });
+    }
+  }
+}
+
+class _EditProfileSheet extends StatefulWidget {
+  const _EditProfileSheet({required this.api, required this.email});
+
+  final ApiClient api;
+  final String email;
+
+  @override
+  State<_EditProfileSheet> createState() => _EditProfileSheetState();
+}
+
+class _EditProfileSheetState extends State<_EditProfileSheet> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _email;
+  final _currentPassword = TextEditingController();
+  final _newPassword = TextEditingController();
+  final _confirmPassword = TextEditingController();
+  bool _isSaving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _email = TextEditingController(text: widget.email);
+  }
+
+  @override
+  void dispose() {
+    _email.dispose();
+    _currentPassword.dispose();
+    _newPassword.dispose();
+    _confirmPassword.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    final email = _email.text.trim();
+    final newPassword = _newPassword.text;
+    if (email == widget.email && newPassword.isEmpty) {
+      setState(() => _error = 'Modifiez l’e-mail ou le mot de passe.');
+      return;
+    }
+    setState(() {
+      _isSaving = true;
+      _error = null;
+    });
+    try {
+      final result = await widget.api.updateProfile(
+        currentPassword: _currentPassword.text,
+        email: email == widget.email ? null : email,
+        newPassword: newPassword.isEmpty ? null : newPassword,
+      );
+      if (mounted) {
+        Navigator.of(context)
+            .pop(Map<String, dynamic>.from(result['user'] as Map));
+      }
+    } on ApiException catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = error.message;
+          _isSaving = false;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = 'Modification impossible : $error';
+          _isSaving = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(24, 8, 24, 24 + bottomInset),
+      child: SingleChildScrollView(
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Modifier mon profil',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+              ),
+              TextFormField(
+                controller: _email,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(labelText: 'Nouvel e-mail'),
+                validator: (value) => (value ?? '').contains('@')
+                    ? null
+                    : 'Adresse e-mail invalide.',
+              ),
+              TextFormField(
+                controller: _currentPassword,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Mot de passe actuel (obligatoire)',
+                ),
+                validator: (value) => (value?.isEmpty ?? true)
+                    ? 'Saisissez votre mot de passe actuel.'
+                    : null,
+              ),
+              TextFormField(
+                controller: _newPassword,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Nouveau mot de passe (facultatif)',
+                ),
+                validator: (value) =>
+                    value != null && value.isNotEmpty && value.length < 8
+                    ? 'Utilisez au moins 8 caractères.'
+                    : null,
+              ),
+              TextFormField(
+                controller: _confirmPassword,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Confirmer le nouveau mot de passe',
+                ),
+                validator: (value) =>
+                    _newPassword.text.isNotEmpty && value != _newPassword.text
+                    ? 'Les mots de passe ne correspondent pas.'
+                    : null,
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Text(_error!, style: const TextStyle(color: Colors.red)),
+              ],
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: _isSaving ? null : _save,
+                child: _isSaving
+                    ? const CircularProgressIndicator()
+                    : const Text('Enregistrer'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _AuthorPage extends StatefulWidget {
@@ -1618,7 +1728,7 @@ class _AuthorPageState extends State<_AuthorPage> {
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 20),
           child: Text(
-            'PDF ou DOCX, 25 Mo maximum. Chaque livre doit être validé avant publication.',
+            'PDF ou DOCX, 25 Mo maximum. Le livre est publié dès son dépôt.',
           ),
         ),
         if (_error != null)
@@ -1689,6 +1799,7 @@ class _UploadBookSheetState extends State<_UploadBookSheet> {
   final _description = TextEditingController();
   final _price = TextEditingController();
   PlatformFile? _file;
+  PlatformFile? _coverImage;
   bool _isSubmitting = false;
   String? _error;
 
@@ -1712,6 +1823,18 @@ class _UploadBookSheetState extends State<_UploadBookSheet> {
     });
   }
 
+  Future<void> _chooseCover() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp'],
+    );
+    if (!mounted || result.isEmpty) return;
+    setState(() {
+      _coverImage = result.single;
+      _error = null;
+    });
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_file == null) {
@@ -1729,6 +1852,7 @@ class _UploadBookSheetState extends State<_UploadBookSheet> {
         price: _price.text.trim().replaceAll(',', '.'),
         currency: 'XOF',
         file: _file!,
+        coverImage: _coverImage,
       );
       if (mounted) Navigator.of(context).pop(true);
     } on ApiException catch (error) {
@@ -1816,6 +1940,14 @@ class _UploadBookSheetState extends State<_UploadBookSheet> {
                 icon: const Icon(Icons.attach_file),
                 label: Text(_file?.name ?? 'Choisir un fichier PDF ou DOCX'),
               ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _isSubmitting ? null : _chooseCover,
+                icon: const Icon(Icons.image_outlined),
+                label: Text(
+                  _coverImage?.name ?? 'Choisir une couverture (facultatif)',
+                ),
+              ),
               if (_error != null) ...[
                 const SizedBox(height: 8),
                 Text(
@@ -1832,7 +1964,7 @@ class _UploadBookSheetState extends State<_UploadBookSheet> {
                         height: 20,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('Envoyer pour validation'),
+                    : const Text('Publier mon livre'),
               ),
             ],
           ),
@@ -1901,45 +2033,29 @@ class _AdminPageState extends State<_AdminPage> {
     }
   }
 
-  Future<void> _review(Map<String, dynamic> book, String status) async {
-    String note = '';
-    if (status == 'rejected') {
-      final controller = TextEditingController();
-      final result = await showDialog<String>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Motif du refus'),
-          content: TextField(
-            controller: controller,
-            minLines: 2,
-            maxLines: 4,
-            decoration: const InputDecoration(
-              hintText: 'Expliquez à l’auteur pourquoi le livre est refusé.',
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Annuler'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, controller.text.trim()),
-              child: const Text('Confirmer le refus'),
-            ),
-          ],
+  Future<void> _removeBook(Map<String, dynamic> book) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Retirer ce livre ?'),
+        content: Text(
+          '« ${book['title'] ?? 'Livre'} » ne sera plus visible dans le catalogue.',
         ),
-      );
-      controller.dispose();
-      if (result == null || result.trim().length < 5) return;
-      note = result.trim();
-    }
-
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Retirer'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
     try {
-      await widget.api.reviewBook(
-        bookId: (book['id'] as num).toInt(),
-        status: status,
-        reviewNote: note,
-      );
+      await widget.api.removeAdminBook((book['id'] as num).toInt());
       if (mounted) await _refresh();
     } on ApiException catch (error) {
       if (mounted) setState(() => _error = error.message);
@@ -2057,9 +2173,9 @@ class _AdminPageState extends State<_AdminPage> {
                 ),
               ),
             ),
-          _sectionHeader('Livres à modérer', _books.length),
+          _sectionHeader('Livres publiés', _books.length),
           if (_books.isEmpty)
-            const ListTile(title: Text('Aucun livre en attente.')),
+            const ListTile(title: Text('Aucun livre publié.')),
           for (final book in _books)
             Card(
               child: Padding(
@@ -2081,24 +2197,20 @@ class _AdminPageState extends State<_AdminPage> {
                       '${book['file_size_bytes'] ?? ''} octets',
                     ),
                     Text(book['description'] as String? ?? ''),
-                    OutlinedButton.icon(
-                      onPressed: () => _downloadBook(book),
-                      icon: const Icon(Icons.download_outlined),
-                      label: const Text('Télécharger pour examiner'),
-                    ),
                     Row(
                       children: [
                         Expanded(
                           child: OutlinedButton(
-                            onPressed: () => _review(book, 'rejected'),
-                            child: const Text('Refuser'),
+                            onPressed: () => _downloadBook(book),
+                            child: const Text('Télécharger pour imprimer'),
                           ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
-                          child: FilledButton(
-                            onPressed: () => _review(book, 'approved'),
-                            child: const Text('Approuver'),
+                          child: OutlinedButton.icon(
+                            onPressed: () => _removeBook(book),
+                            icon: const Icon(Icons.delete_outline),
+                            label: const Text('Retirer du catalogue'),
                           ),
                         ),
                       ],
@@ -2157,123 +2269,6 @@ class _AdminPageState extends State<_AdminPage> {
       child: Text(
         count == null ? title : '$title ($count)',
         style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-      ),
-    );
-  }
-}
-
-class _ReaderPage extends StatefulWidget {
-  const _ReaderPage({required this.book});
-
-  final Book book;
-
-  @override
-  State<_ReaderPage> createState() => _ReaderPageState();
-}
-
-class _ReaderPageState extends State<_ReaderPage> {
-  double _fontSize = 19;
-  bool _isNightMode = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final backgroundColor = _isNightMode
-        ? const Color(0xFF202720)
-        : const Color(0xFFFAF8F3);
-    final textColor = _isNightMode
-        ? const Color(0xFFE9E6DC)
-        : const Color(0xFF28372D);
-
-    return Scaffold(
-      backgroundColor: backgroundColor,
-      appBar: AppBar(
-        backgroundColor: backgroundColor,
-        foregroundColor: textColor,
-        title: Text(widget.book.title, maxLines: 1),
-        actions: [
-          IconButton(
-            tooltip: 'Réduire la taille du texte',
-            onPressed: () => setState(
-              () => _fontSize = (_fontSize - 1).clamp(16.0, 30.0).toDouble(),
-            ),
-            icon: const Icon(Icons.text_decrease),
-          ),
-          IconButton(
-            tooltip: 'Agrandir la taille du texte',
-            onPressed: () => setState(
-              () => _fontSize = (_fontSize + 1).clamp(16.0, 30.0).toDouble(),
-            ),
-            icon: const Icon(Icons.text_increase),
-          ),
-          IconButton(
-            tooltip: _isNightMode ? 'Mode jour' : 'Mode nuit',
-            onPressed: () => setState(() => _isNightMode = !_isNightMode),
-            icon: Icon(
-              _isNightMode
-                  ? Icons.light_mode_outlined
-                  : Icons.dark_mode_outlined,
-            ),
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(24, 18, 24, 36),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'EXTRAIT DE DÉMONSTRATION',
-              style: TextStyle(
-                color: _isNightMode
-                    ? const Color(0xFFB9C9B5)
-                    : const Color(0xFF647660),
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.2,
-              ),
-            ),
-            const SizedBox(height: 26),
-            Text(
-              widget.book.title,
-              style: TextStyle(
-                color: textColor,
-                fontSize: 27,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Par ${widget.book.author}',
-              style: TextStyle(
-                color: textColor.withValues(alpha: 0.72),
-                fontSize: 15,
-              ),
-            ),
-            const SizedBox(height: 30),
-            for (final paragraph in widget.book.content) ...[
-              Text(
-                paragraph,
-                style: TextStyle(
-                  color: textColor,
-                  fontSize: _fontSize,
-                  height: 1.8,
-                ),
-              ),
-              const SizedBox(height: 22),
-            ],
-            const Divider(),
-            Text(
-              'Ce lecteur utilise un texte intégré à l’application. '
-              'Le chiffrement, le DRM et la synchronisation ne sont pas '
-              'encore implémentés.',
-              style: TextStyle(
-                color: textColor.withValues(alpha: 0.72),
-                fontSize: 13,
-                height: 1.5,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -2344,43 +2339,7 @@ class _BookCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: Container(
-                width: 142,
-                decoration: BoxDecoration(
-                  color: book.color,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Stack(
-                  children: [
-                    Positioned(
-                      right: 10,
-                      top: 10,
-                      child: Icon(
-                        Icons.auto_stories,
-                        color: Colors.white.withValues(alpha: 0.82),
-                        size: 25,
-                      ),
-                    ),
-                    Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Text(
-                          book.title,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            height: 1.2,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+            Expanded(child: _BookCover(book: book, width: 142)),
             const SizedBox(height: 8),
             Text(
               book.title,
@@ -2410,16 +2369,72 @@ class _BookCard extends StatelessWidget {
   }
 }
 
+class _BookCover extends StatelessWidget {
+  const _BookCover({required this.book, required this.width, this.height});
+
+  final Book book;
+  final double width;
+  final double? height;
+
+  @override
+  Widget build(BuildContext context) {
+    final coverUrl = book.coverUrl;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: coverUrl == null
+            ? ColoredBox(
+                color: book.color,
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.auto_stories, color: Colors.white),
+                        const SizedBox(height: 8),
+                        Text(
+                          book.title,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              )
+            : Image.network(
+                coverUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => ColoredBox(
+                  color: book.color,
+                  child: const Center(
+                    child: Icon(Icons.image_not_supported, color: Colors.white),
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
 class Book {
   const Book({
     required this.title,
     required this.author,
     required this.color,
-    required this.content,
     this.id,
     this.price,
     this.currency,
     this.fileType,
+    this.coverUrl,
   });
 
   factory Book.fromApi(Map<String, dynamic> data) {
@@ -2430,10 +2445,12 @@ class Book {
       title: data['title'] as String? ?? 'Livre sans titre',
       author: data['author_name'] as String? ?? 'Auteur',
       color: const Color(0xFF62745B),
-      content: const [],
       price: price?.toString(),
       currency: data['currency'] as String? ?? '',
       fileType: data['file_type'] as String?,
+      coverUrl: id is num && data['cover_mime_type'] is String
+          ? '$apiBaseUrl/books/${id.toInt()}/cover'
+          : null,
     );
   }
 
@@ -2441,8 +2458,8 @@ class Book {
   final String title;
   final String author;
   final Color color;
-  final List<String> content;
   final String? price;
   final String? currency;
   final String? fileType;
+  final String? coverUrl;
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -472,8 +472,9 @@ test('registration rejects a seven-character password', async (t) => {
   assert.equal((await response.json()).error, 'VALIDATION_ERROR');
 });
 
-test('author upload stores a PDF privately and submits it for moderation', async (t) => {
+test('author upload publishes the PDF and stores it in persistent database chunks', async (t) => {
   let insertedBook;
+  const insertedChunks = [];
   const app = await startServer(t, {
     execute: async (sql, parameters) => {
       if (sql.includes('FROM platform_users WHERE id = ?')) {
@@ -485,17 +486,30 @@ test('author upload stores a PDF privately and submits it for moderation', async
           status: 'active',
         }], []];
       }
-      if (sql.includes('INSERT INTO platform_books')) {
-        insertedBook = parameters;
-        return [{ insertId: 42, affectedRows: 1 }, []];
-      }
       throw new Error(`Requête non prévue dans le test : ${sql}`);
     },
+    getConnection: async () => ({
+      beginTransaction: async () => {},
+      execute: async (sql, parameters) => {
+        if (sql.includes('INSERT INTO platform_books')) {
+          insertedBook = parameters;
+          return [{ insertId: 42, affectedRows: 1 }, []];
+        }
+        if (sql.includes('INSERT INTO platform_book_file_chunks')) {
+          insertedChunks.push(parameters);
+          return [{ affectedRows: 1 }, []];
+        }
+        throw new Error(`Requête non prévue dans le test : ${sql}`);
+      },
+      commit: async () => {},
+      rollback: async () => {},
+      release: () => {},
+    }),
   });
 
   const token = signAccessToken(9, jwtSecret);
   const form = new FormData();
-  form.set('title', 'Livre en attente');
+  form.set('title', 'Livre publié');
   form.set('description', 'Une description suffisamment longue.');
   form.set('price', '8');
   form.set('currency', 'XOF');
@@ -513,14 +527,14 @@ test('author upload stores a PDF privately and submits it for moderation', async
     body: form,
   });
   assert.equal(response.status, 201);
-  assert.equal((await response.json()).book.status, 'pending');
+  const result = await response.json();
+  assert.equal(result.book.status, 'approved');
+  assert.equal(result.message, 'Votre livre est maintenant publié dans le catalogue.');
   assert.equal(insertedBook[6], 'livre.pdf');
   assert.equal(insertedBook[7], 'pdf');
-
-  const privateBooksDirectory = path.join(app.privateFilesDirectory, 'books');
-  const files = await readdir(privateBooksDirectory);
-  assert.equal(files.length, 1);
-  assert.match(files[0], /\.pdf$/);
+  assert.equal(insertedChunks.length, 1);
+  assert.equal(insertedChunks[0][1], 'document');
+  assert.equal(insertedChunks[0][3].toString(), '%PDF-1.7\nExtrait de test');
 });
 
 test('upload rejects a renamed non-document without inserting a book', async (t) => {
@@ -563,7 +577,7 @@ test('upload rejects a renamed non-document without inserting a book', async (t)
   assert.equal(insertedBook, false);
 });
 
-test('only an administrator can retrieve a submitted book for review', async (t) => {
+test('an administrator can download a published book to print it', async (t) => {
   const app = await startServer(t, {
     execute: async (sql) => {
       if (sql.includes('FROM platform_users WHERE id = ?')) {
@@ -575,20 +589,21 @@ test('only an administrator can retrieve a submitted book for review', async (t)
           status: 'active',
         }], []];
       }
-      if (sql.includes('SELECT storage_key, file_type, original_file_name')) {
+      if (sql.includes('SELECT file_type, original_file_name')) {
         return [[{
-          storage_key: '12345678-1234-1234-1234-123456789012',
           file_type: 'pdf',
           original_file_name: 'document.pdf',
+        }], []];
+      }
+      if (sql.includes('SELECT chunk_index, file_data')) {
+        return [[{
+          chunk_index: 0,
+          file_data: Buffer.from('%PDF-1.7\nreview'),
         }], []];
       }
       throw new Error(`Requête non prévue dans le test : ${sql}`);
     },
   });
-  const storageKey = '12345678-1234-1234-1234-123456789012';
-  const booksDirectory = path.join(app.privateFilesDirectory, 'books');
-  await mkdir(booksDirectory, { recursive: true });
-  await writeFile(path.join(booksDirectory, `${storageKey}.pdf`), '%PDF-1.7\nreview');
 
   const token = signAccessToken(2, jwtSecret);
   const response = await fetch(`${app.baseUrl}/admin/books/42/file`, {
@@ -598,4 +613,87 @@ test('only an administrator can retrieve a submitted book for review', async (t)
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-disposition'), /document\.pdf/);
   assert.equal(await response.text(), '%PDF-1.7\nreview');
+});
+
+test('reader library only lists books with confirmed purchases', async (t) => {
+  const app = await startServer(t, {
+    execute: async (sql) => {
+      if (sql.includes('FROM platform_users WHERE id = ?')) {
+        return [[{
+          id: 9,
+          email: 'reader@example.test',
+          display_name: 'Lecteur',
+          role: 'reader',
+          status: 'active',
+        }], []];
+      }
+      if (sql.includes("o.status = 'paid'")) {
+        return [[{
+          id: 42,
+          title: 'Livre acheté',
+          author_name: 'Auteur',
+          file_type: 'pdf',
+          price_amount: '8.00',
+          currency: 'XOF',
+        }], []];
+      }
+      throw new Error(`Requête non prévue dans le test : ${sql}`);
+    },
+  });
+  const token = signAccessToken(9, jwtSecret);
+  const response = await fetch(`${app.baseUrl}/purchases`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.books.length, 1);
+  assert.equal(result.books[0].title, 'Livre acheté');
+});
+
+test('administrator can remove a published book from the catalogue', async (t) => {
+  let archivedBookId;
+  const app = await startServer(t, {
+    execute: async (sql, parameters) => {
+      if (sql.includes('FROM platform_users WHERE id = ?')) {
+        return [[{
+          id: 2,
+          email: 'admin@example.test',
+          display_name: 'Administrateur',
+          role: 'admin',
+          status: 'active',
+        }], []];
+      }
+      if (sql.includes("UPDATE platform_books SET status = 'archived'")) {
+        archivedBookId = parameters[0];
+        return [{ affectedRows: 1 }, []];
+      }
+      throw new Error(`Requête non prévue dans le test : ${sql}`);
+    },
+  });
+  const token = signAccessToken(2, jwtSecret);
+  const response = await fetch(`${app.baseUrl}/admin/books/42`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(archivedBookId, 42);
+  assert.equal((await response.json()).message, 'Livre retiré du catalogue.');
+});
+
+test('password reset reports when email delivery is not configured', async (t) => {
+  const app = await startServer(t, {
+    execute: async () => {
+      throw new Error('Un e-mail non configuré ne doit pas interroger MySQL.');
+    },
+  });
+  const response = await fetch(`${app.baseUrl}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'reader@example.test' }),
+  });
+
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'PASSWORD_RESET_NOT_CONFIGURED');
 });

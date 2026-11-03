@@ -28,6 +28,10 @@ const app = createApp({
   privateFilesDirectory,
   fedapay,
   fedapayEnvironment: config.FEDAPAY_ENVIRONMENT,
+  mailApiKey: config.MAIL_API_KEY,
+  mailFromEmail: config.MAIL_FROM_EMAIL ?? '',
+  mailFromName: config.MAIL_FROM_NAME,
+  publicApiUrl: config.publicApiUrl,
 });
 const server = app.listen(config.PORT, config.HOST, () => {
   console.info(`API démarrée sur le port ${config.PORT}.`);

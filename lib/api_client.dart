@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
@@ -70,6 +71,31 @@ class ApiClient {
     return _jsonRequest('GET', '/auth/me', authenticated: true);
   }
 
+  Future<Map<String, dynamic>> updateProfile({
+    required String currentPassword,
+    String? email,
+    String? newPassword,
+  }) {
+    return _jsonRequest(
+      'PATCH',
+      '/auth/profile',
+      authenticated: true,
+      body: {
+        'currentPassword': currentPassword,
+        'email': ?email,
+        'newPassword': ?newPassword,
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> requestPasswordReset(String email) {
+    return _jsonRequest(
+      'POST',
+      '/auth/forgot-password',
+      body: {'email': email},
+    );
+  }
+
   Future<List<Map<String, dynamic>>> books({String search = ''}) async {
     final result = await _jsonRequest(
       'GET',
@@ -93,6 +119,7 @@ class ApiClient {
     required String price,
     required String currency,
     required PlatformFile file,
+    PlatformFile? coverImage,
   }) async {
     final uri = Uri.parse('$apiBaseUrl/author/books');
     final request = http.MultipartRequest('POST', uri)
@@ -108,6 +135,26 @@ class ApiClient {
       request.files.add(
         await http.MultipartFile.fromPath('file', path, filename: file.name),
       );
+
+      if (coverImage case final cover?) {
+        if (cover.path case final path?) {
+          request.files.add(
+            await http.MultipartFile.fromPath(
+              'cover',
+              path,
+              filename: cover.name,
+            ),
+          );
+        } else {
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              'cover',
+              await cover.readAsBytes(),
+              filename: cover.name,
+            ),
+          );
+        }
+      }
     } else {
       request.files.add(
         http.MultipartFile.fromBytes(
@@ -124,13 +171,22 @@ class ApiClient {
   }
 
   Future<List<Map<String, dynamic>>> adminBooks({
-    String status = 'pending',
+    String status = 'approved',
   }) async {
     final result = await _jsonRequest(
       'GET',
       '/admin/books?status=${Uri.encodeQueryComponent(status)}',
       authenticated: true,
     );
+    return _mapList(result['books']);
+  }
+
+  Future<Map<String, dynamic>> removeAdminBook(int bookId) {
+    return _jsonRequest('DELETE', '/admin/books/$bookId', authenticated: true);
+  }
+
+  Future<List<Map<String, dynamic>>> purchasedBooks() async {
+    final result = await _jsonRequest('GET', '/purchases', authenticated: true);
     return _mapList(result['books']);
   }
 
@@ -276,6 +332,8 @@ class ApiClient {
           return _client.patch(uri, headers: headers, body: jsonEncode(body));
         case 'PUT':
           return _client.put(uri, headers: headers, body: jsonEncode(body));
+        case 'DELETE':
+          return _client.delete(uri, headers: headers);
         default:
           throw ArgumentError.value(method, 'method', 'Méthode HTTP inconnue.');
       }
@@ -296,11 +354,17 @@ class ApiClient {
 
   Future<T> _send<T>(Future<T> Function() send) async {
     try {
-      return await send().timeout(const Duration(seconds: 20));
+      return await send().timeout(const Duration(seconds: 90));
     } on ApiException {
       rethrow;
+    } on TimeoutException {
+      throw const ApiException(
+        'Le serveur met trop de temps à répondre. Réessayez dans quelques instants.',
+      );
     } catch (error) {
-      throw ApiException('Connexion au serveur impossible : $error');
+      throw ApiException(
+        'Connexion au serveur impossible. Vérifiez la connexion Internet de votre téléphone puis réessayez.',
+      );
     }
   }
 

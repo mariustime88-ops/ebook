@@ -42,6 +42,16 @@ const serverSchema = databaseSchema.extend({
     (value) => value === '' ? undefined : value,
     z.string().url().optional(),
   ),
+  MAIL_API_KEY: z.string().default(''),
+  MAIL_FROM_EMAIL: z.preprocess(
+    (value) => value === '' ? undefined : value,
+    z.string().email().optional(),
+  ),
+  MAIL_FROM_NAME: z.string().trim().min(1).default('Application Livre'),
+  PUBLIC_API_URL: z.preprocess(
+    (value) => value === '' ? undefined : value,
+    z.string().url().optional(),
+  ),
 });
 
 export function loadServerConfig(env = process.env) {
@@ -55,5 +65,6 @@ export function loadServerConfig(env = process.env) {
     corsOrigins: config.CORS_ORIGINS.split(',')
       .map((origin) => origin.trim())
       .filter(Boolean),
+    publicApiUrl: config.PUBLIC_API_URL ?? process.env.RENDER_EXTERNAL_URL ?? '',
   };
 }

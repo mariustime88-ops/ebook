@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import {
   mkdir,
   open,
-  rename,
   rm,
 } from 'node:fs/promises';
 import path from 'node:path';
@@ -21,6 +20,8 @@ import { HttpError, errorHandler, notFoundHandler } from './errors.js';
 
 const openZip = promisify(yauzl.open);
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
+const MAX_COVER_SIZE = 5 * 1024 * 1024;
+const FILE_CHUNK_SIZE = 512 * 1024;
 const registerSchema = z.object({
   email: z.string().trim().email().max(191).transform((value) => value.toLowerCase()),
   displayName: z.string().trim().min(2).max(120),
@@ -31,6 +32,23 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   email: z.string().trim().email().max(191).transform((value) => value.toLowerCase()),
   password: z.string().min(1).max(128),
+});
+
+const profileSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  email: z.string().trim().email().max(191).transform((value) => value.toLowerCase()).optional(),
+  newPassword: z.string().min(8).max(128).optional(),
+}).refine(
+  (value) => value.email !== undefined || value.newPassword !== undefined,
+  { message: 'Modifiez l’adresse e-mail ou le mot de passe.' },
+);
+
+const resetRequestSchema = z.object({
+  email: z.string().trim().email().max(191).transform((value) => value.toLowerCase()),
+});
+const resetPasswordSchema = z.object({
+  token: z.string().regex(/^[a-f0-9]{64}$/),
+  password: z.string().min(8).max(128),
 });
 
 const bookSchema = z.object({
@@ -76,10 +94,6 @@ function parsePage(query) {
     ...parsed,
     offset: (parsed.page - 1) * parsed.limit,
   };
-}
-
-function fileExtension(fileType) {
-  return fileType === 'pdf' ? '.pdf' : '.docx';
 }
 
 async function removeIfExists(filePath) {
@@ -170,8 +184,106 @@ function createUploadMiddleware(stagingDirectory) {
 
   return multer({
     storage,
-    limits: { fileSize: MAX_FILE_SIZE, files: 1, fields: 10 },
-  }).single('file');
+    limits: { fileSize: MAX_FILE_SIZE, files: 2, fields: 10 },
+  }).fields([
+    { name: 'file', maxCount: 1 },
+    { name: 'cover', maxCount: 1 },
+  ]);
+}
+
+async function identifyCoverImage(filePath) {
+  const handle = await open(filePath, 'r');
+  const signature = Buffer.alloc(12);
+  let bytesRead;
+  try {
+    ({ bytesRead } = await handle.read(signature, 0, signature.length, 0));
+  } finally {
+    await handle.close();
+  }
+
+  if (
+    bytesRead >= 8
+    && signature.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
+  ) return 'image/png';
+  if (
+    bytesRead >= 3
+    && signature[0] === 0xff
+    && signature[1] === 0xd8
+    && signature[2] === 0xff
+  ) return 'image/jpeg';
+  if (
+    bytesRead >= 12
+    && signature.toString('ascii', 0, 4) === 'RIFF'
+    && signature.toString('ascii', 8, 12) === 'WEBP'
+  ) return 'image/webp';
+  return null;
+}
+
+async function storeFileChunks(connection, bookId, kind, filePath) {
+  let chunkIndex = 0;
+  for await (const chunk of createReadStream(filePath, {
+    highWaterMark: FILE_CHUNK_SIZE,
+  })) {
+    await connection.execute(
+      `INSERT INTO platform_book_file_chunks
+        (book_id, file_kind, chunk_index, file_data)
+       VALUES (?, ?, ?, ?)`,
+      [bookId, kind, chunkIndex, chunk],
+    );
+    chunkIndex += 1;
+  }
+}
+
+async function readFileChunks(pool, bookId, kind) {
+  const [chunks] = await pool.execute(
+    `SELECT chunk_index, file_data FROM platform_book_file_chunks
+     WHERE book_id = ? AND file_kind = ? ORDER BY chunk_index`,
+    [bookId, kind],
+  );
+  if (chunks.length === 0) {
+    throw new HttpError(404, 'FILE_NOT_FOUND', 'Le fichier de ce livre est indisponible.');
+  }
+  return Buffer.concat(chunks.map((chunk) => chunk.file_data));
+}
+
+async function deliverStoredFile(pool, response, bookId, kind, contentType, fileName) {
+  const contents = await readFileChunks(pool, bookId, kind);
+  response.set({
+    'Content-Type': contentType,
+    'Content-Length': String(contents.length),
+    'Content-Disposition': `attachment; filename="${path.basename(fileName).replace(/["\\\r\n]/g, '_')}"`,
+    'X-Content-Type-Options': 'nosniff',
+  });
+  response.end(contents);
+}
+
+async function sendPasswordResetEmail({
+  apiKey,
+  fromEmail,
+  fromName,
+  toEmail,
+  resetUrl,
+}) {
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'api-key': apiKey,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { email: fromEmail, name: fromName },
+      to: [{ email: toEmail }],
+      subject: 'Réinitialisation de votre mot de passe',
+      textContent: `Pour choisir un nouveau mot de passe, ouvrez ce lien (valable 30 minutes) : ${resetUrl}`,
+      htmlContent: `<p>Vous avez demandé à réinitialiser votre mot de passe.</p><p><a href="${resetUrl}">Choisir un nouveau mot de passe</a></p><p>Ce lien expire dans 30 minutes. Si vous n’êtes pas à l’origine de cette demande, ignorez cet e-mail.</p>`,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Le service d’e-mail a répondu avec le statut ${response.status}.`);
+  }
 }
 
 export function createApiRouter({
@@ -180,10 +292,13 @@ export function createApiRouter({
   privateFilesDirectory,
   fedapay = null,
   fedapayEnvironment = 'sandbox',
+  mailApiKey = '',
+  mailFromEmail = '',
+  mailFromName = 'Application Livre',
+  publicApiUrl = '',
 }) {
   const router = express.Router();
   const auth = authenticate(pool, jwtSecret);
-  const uploadsDirectory = path.join(privateFilesDirectory, 'books');
   const stagingDirectory = path.join(privateFilesDirectory, '.incoming');
   const upload = createUploadMiddleware(stagingDirectory);
   const paymentLimiter = rateLimit({
@@ -212,6 +327,12 @@ export function createApiRouter({
       message: 'Trop de tentatives. Réessayez plus tard.',
     },
   });
+  const passwordResetLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+  });
   const uploadLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
     limit: 10,
@@ -221,6 +342,132 @@ export function createApiRouter({
       error: 'RATE_LIMITED',
       message: 'Trop de dépôts. Réessayez plus tard.',
     },
+  });
+
+  router.post('/auth/forgot-password', passwordResetLimiter, async (request, response) => {
+    if (!mailApiKey || !mailFromEmail || !publicApiUrl) {
+      throw new HttpError(
+        503,
+        'PASSWORD_RESET_NOT_CONFIGURED',
+        'La récupération par e-mail n’est pas encore configurée.',
+      );
+    }
+
+    const { email } = resetRequestSchema.parse(request.body);
+    const [users] = await pool.execute(
+      'SELECT id FROM platform_users WHERE email = ? LIMIT 1',
+      [email],
+    );
+    if (users[0]) {
+      const token = randomBytes(32).toString('hex');
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      await pool.execute(
+        'DELETE FROM platform_password_reset_tokens WHERE user_id = ?',
+        [users[0].id],
+      );
+      await pool.execute(
+        `INSERT INTO platform_password_reset_tokens (token_hash, user_id, expires_at)
+         VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 30 MINUTE))`,
+        [tokenHash, users[0].id],
+      );
+      const resetUrl = `${publicApiUrl.replace(/\/+$/, '')}/api/auth/reset-password?token=${token}`;
+      try {
+        await sendPasswordResetEmail({
+          apiKey: mailApiKey,
+          fromEmail: mailFromEmail,
+          fromName: mailFromName,
+          toEmail: email,
+          resetUrl,
+        });
+      } catch (error) {
+        await pool.execute(
+          'DELETE FROM platform_password_reset_tokens WHERE token_hash = ?',
+          [tokenHash],
+        );
+        console.error(`Échec d’envoi de l’e-mail de réinitialisation : ${error.message}`);
+        throw new HttpError(
+          502,
+          'PASSWORD_RESET_EMAIL_FAILED',
+          'L’e-mail n’a pas pu être envoyé. Réessayez plus tard.',
+        );
+      }
+    }
+
+    response.json({
+      message: 'Si cette adresse possède un compte, un lien de réinitialisation a été envoyé.',
+    });
+  });
+
+  router.get('/auth/reset-password', (request, response) => {
+    const token = typeof request.query.token === 'string'
+      && /^[a-f0-9]{64}$/.test(request.query.token)
+      ? request.query.token
+      : '';
+    response.type('html').send(`<!doctype html>
+      <html lang="fr"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+      <title>Nouveau mot de passe</title>
+      <h1>Choisir un nouveau mot de passe</h1>
+      ${token
+        ? `<form method="post" action="/api/auth/reset-password">
+          <input type="hidden" name="token" value="${token}">
+          <label>Nouveau mot de passe (8 caractères minimum)
+            <input type="password" name="password" minlength="8" maxlength="128" required autocomplete="new-password">
+          </label>
+          <button type="submit">Enregistrer le mot de passe</button>
+        </form>`
+        : '<p>Ce lien est invalide. Demandez une nouvelle réinitialisation depuis l’application.</p>'}
+      </html>`);
+  });
+
+  router.post('/auth/reset-password', async (request, response) => {
+    const input = resetPasswordSchema.parse(request.body);
+    const tokenHash = createHash('sha256').update(input.token).digest('hex');
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [tokens] = await connection.execute(
+        `SELECT user_id FROM platform_password_reset_tokens
+         WHERE token_hash = ? AND consumed_at IS NULL
+           AND expires_at > UTC_TIMESTAMP()
+         LIMIT 1 FOR UPDATE`,
+        [tokenHash],
+      );
+      if (!tokens[0]) {
+        throw new HttpError(
+          400,
+          'PASSWORD_RESET_INVALID',
+          'Ce lien a expiré ou a déjà été utilisé. Demandez-en un nouveau.',
+        );
+      }
+
+      const passwordHash = await bcrypt.hash(input.password, 12);
+      await connection.execute(
+        'UPDATE platform_users SET password_hash = ? WHERE id = ?',
+        [passwordHash, tokens[0].user_id],
+      );
+      await connection.execute(
+        'UPDATE platform_password_reset_tokens SET consumed_at = UTC_TIMESTAMP() WHERE token_hash = ?',
+        [tokenHash],
+      );
+      await connection.execute(
+        'DELETE FROM platform_password_reset_tokens WHERE user_id = ? AND token_hash <> ?',
+        [tokens[0].user_id, tokenHash],
+      );
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    if (request.is('application/json')) {
+      response.json({ message: 'Mot de passe modifié. Vous pouvez vous connecter.' });
+    } else {
+      response.type('html').send(
+        '<!doctype html><html lang="fr"><meta charset="utf-8"><title>Mot de passe modifié</title><h1>Mot de passe modifié</h1><p>Retournez dans l’application et connectez-vous avec votre nouveau mot de passe.</p></html>',
+      );
+    }
   });
 
   router.post('/auth/register', authLimiter, async (request, response) => {
@@ -286,13 +533,61 @@ export function createApiRouter({
     response.json({ user: publicUser(request.user) });
   });
 
+  router.patch('/auth/profile', auth, async (request, response) => {
+    const input = profileSchema.parse(request.body);
+    const [users] = await pool.execute(
+      'SELECT id, email, password_hash, display_name, role, status FROM platform_users WHERE id = ? LIMIT 1',
+      [request.user.id],
+    );
+    const user = users[0];
+    if (!user || !(await bcrypt.compare(input.currentPassword, user.password_hash))) {
+      throw new HttpError(401, 'CURRENT_PASSWORD_INVALID', 'Le mot de passe actuel est incorrect.');
+    }
+
+    const fields = [];
+    const values = [];
+    if (input.email !== undefined && input.email !== user.email) {
+      fields.push('email = ?');
+      values.push(input.email);
+      user.email = input.email;
+    }
+    if (input.newPassword !== undefined) {
+      fields.push('password_hash = ?');
+      values.push(await bcrypt.hash(input.newPassword, 12));
+    }
+    if (fields.length === 0) {
+      response.json({ user: publicUser(user), message: 'Aucune modification.' });
+      return;
+    }
+
+    try {
+      await pool.execute(
+        `UPDATE platform_users SET ${fields.join(', ')} WHERE id = ?`,
+        [...values, request.user.id],
+      );
+    } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY') {
+        throw new HttpError(409, 'EMAIL_ALREADY_USED', 'Cette adresse e-mail est déjà utilisée.');
+      }
+      throw error;
+    }
+    if (input.newPassword !== undefined) {
+      await pool.execute(
+        'DELETE FROM platform_password_reset_tokens WHERE user_id = ?',
+        [request.user.id],
+      );
+    }
+    response.json({ user: publicUser(user), message: 'Profil mis à jour.' });
+  });
+
   router.get('/books', async (request, response) => {
     const { page, limit, search, offset } = parsePage(request.query);
     const searchTerm = `%${search}%`;
     const [rows, countRows] = await Promise.all([
       pool.execute(
         `SELECT b.id, b.title, b.description, b.price_amount, b.currency,
-                b.file_type, b.created_at, u.display_name AS author_name
+                b.file_type, b.cover_mime_type, b.created_at,
+                u.display_name AS author_name
          FROM platform_books b
          JOIN platform_users u ON u.id = b.author_id
          WHERE b.status = 'approved'
@@ -317,6 +612,28 @@ export function createApiRouter({
       limit,
       total: Number(countRows[0][0].total),
     });
+  });
+
+  router.get('/books/:id/cover', async (request, response) => {
+    const id = z.coerce.number().int().positive().parse(request.params.id);
+    const [books] = await pool.execute(
+      `SELECT cover_mime_type FROM platform_books
+       WHERE id = ? AND status = 'approved' LIMIT 1`,
+      [id],
+    );
+    const book = books[0];
+    if (!book?.cover_mime_type) {
+      throw new HttpError(404, 'COVER_NOT_FOUND', 'La couverture de ce livre est indisponible.');
+    }
+    const contents = await readFileChunks(pool, id, 'cover');
+    response.set({
+      'Content-Type': book.cover_mime_type,
+      'Content-Length': String(contents.length),
+      'Cache-Control': 'public, max-age=300',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    response.end(contents);
   });
 
   router.post(
@@ -578,6 +895,28 @@ export function createApiRouter({
   );
 
   router.get(
+      '/purchases',
+      auth,
+      requireRole('reader', 'author'),
+      async (request, response) => {
+        const [books] = await pool.execute(
+          `SELECT b.id, b.title, b.description, b.price_amount, b.currency,
+                  b.file_type, b.cover_mime_type, u.display_name AS author_name,
+                  MAX(o.paid_at) AS purchased_at
+           FROM platform_orders o
+           JOIN platform_books b ON b.id = o.book_id
+           JOIN platform_users u ON u.id = b.author_id
+           WHERE o.buyer_id = ? AND o.status = 'paid'
+           GROUP BY b.id, b.title, b.description, b.price_amount, b.currency,
+                    b.file_type, b.cover_mime_type, u.display_name
+           ORDER BY purchased_at DESC`,
+          [request.user.id],
+        );
+        response.json({ books });
+      },
+  );
+
+  router.get(
       '/purchases/:bookId/file',
       auth,
       requireRole('reader', 'author'),
@@ -600,33 +939,23 @@ export function createApiRouter({
           );
         }
 
-        const filePath = path.join(
-          uploadsDirectory,
-          `${book.storage_key}${fileExtension(book.file_type)}`,
+        await deliverStoredFile(
+          pool,
+          response,
+          bookId,
+          'document',
+          book.file_type === 'pdf'
+            ? 'application/pdf'
+            : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          book.original_file_name,
         );
-        response.set({
-          'Content-Disposition': `attachment; filename="${path.basename(book.original_file_name).replace(/["\\\\\\r\\n]/g, '_')}"`,
-          'X-Content-Type-Options': 'nosniff',
-        });
-        const file = createReadStream(filePath);
-        file.on('error', (error) => {
-          if (!response.headersSent) {
-            response.status(404).json({
-              error: 'FILE_NOT_FOUND',
-              message: 'Le fichier acheté est indisponible.',
-            });
-          } else {
-            response.destroy(error);
-          }
-        });
-        file.pipe(response);
       },
   );
 
   router.get('/author/books', auth, requireRole('author'), async (request, response) => {
     const [books] = await pool.execute(
       `SELECT id, title, description, price_amount, currency, file_type,
-              status, review_note, created_at, reviewed_at
+              cover_mime_type, status, review_note, created_at, reviewed_at
        FROM platform_books WHERE author_id = ? ORDER BY created_at DESC`,
       [request.user.id],
     );
@@ -645,13 +974,15 @@ export function createApiRouter({
       );
     },
     async (request, response) => {
-      if (!request.file) {
+      const document = request.files?.file?.[0];
+      const cover = request.files?.cover?.[0];
+      if (!document) {
+        if (cover) await removeIfExists(cover.path);
         throw new HttpError(400, 'FILE_REQUIRED', 'Joignez un fichier PDF ou DOCX.');
       }
 
-      let permanentPath;
       try {
-        const documentType = await identifyDocument(request.file.path);
+        const documentType = await identifyDocument(document.path);
         if (!documentType) {
           throw new HttpError(
             400,
@@ -660,30 +991,59 @@ export function createApiRouter({
           );
         }
 
+        if (cover && cover.size > MAX_COVER_SIZE) {
+          throw new HttpError(
+            413,
+            'COVER_TOO_LARGE',
+            'La couverture ne doit pas dépasser 5 Mo.',
+          );
+        }
+        const coverMimeType = cover
+          ? await identifyCoverImage(cover.path)
+          : null;
+        if (cover && !coverMimeType) {
+          throw new HttpError(
+            400,
+            'UNSUPPORTED_COVER',
+            'La couverture doit être une image JPG, PNG ou WebP valide.',
+          );
+        }
+
         const input = bookSchema.parse(request.body);
         const storageKey = randomUUID();
-        await mkdir(uploadsDirectory, { recursive: true });
-        permanentPath = path.join(uploadsDirectory, `${storageKey}${fileExtension(documentType)}`);
-        await rename(request.file.path, permanentPath);
-
-        const [result] = await pool.execute(
-          `INSERT INTO platform_books
-            (author_id, title, description, price_amount, currency, storage_key,
-             original_file_name, file_type, file_size_bytes, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-          [
-            request.user.id,
-            input.title,
-            input.description,
-            input.price.toFixed(2),
-            input.currency,
-            storageKey,
-            path.basename(request.file.originalname).replace(/[\\/]/g, '').slice(0, 255),
-            documentType,
-            request.file.size,
-          ],
-        );
-        permanentPath = undefined;
+        const connection = await pool.getConnection();
+        let result;
+        try {
+          await connection.beginTransaction();
+          [result] = await connection.execute(
+            `INSERT INTO platform_books
+              (author_id, title, description, price_amount, currency, storage_key,
+               original_file_name, file_type, cover_mime_type, file_size_bytes, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')`,
+            [
+              request.user.id,
+              input.title,
+              input.description,
+              input.price.toFixed(2),
+              input.currency,
+              storageKey,
+              path.basename(document.originalname).replace(/[\\/]/g, '').slice(0, 255),
+              documentType,
+              coverMimeType,
+              document.size,
+            ],
+          );
+          await storeFileChunks(connection, result.insertId, 'document', document.path);
+          if (cover) {
+            await storeFileChunks(connection, result.insertId, 'cover', cover.path);
+          }
+          await connection.commit();
+        } catch (error) {
+          await connection.rollback();
+          throw error;
+        } finally {
+          connection.release();
+        }
 
         response.status(201).json({
           book: {
@@ -692,13 +1052,14 @@ export function createApiRouter({
             price: input.price.toFixed(2),
             currency: input.currency,
             fileType: documentType,
-            status: 'pending',
+            status: 'approved',
+            coverMimeType,
           },
-          message: 'Votre livre a été envoyé à l’administrateur pour validation.',
+          message: 'Votre livre est maintenant publié dans le catalogue.',
         });
       } finally {
-        await removeIfExists(request.file.path);
-        if (permanentPath) await removeIfExists(permanentPath);
+        await removeIfExists(document.path);
+        if (cover) await removeIfExists(cover.path);
       }
     },
   );
@@ -758,11 +1119,12 @@ export function createApiRouter({
 
   router.get('/admin/books', auth, requireRole('admin'), async (request, response) => {
     const query = z.object({
-      status: z.enum(['pending', 'approved', 'rejected']).default('pending'),
+      status: z.enum(['pending', 'approved', 'rejected', 'archived']).default('approved'),
     }).parse(request.query);
     const [books] = await pool.execute(
       `SELECT b.id, b.title, b.description, b.price_amount, b.currency,
-              b.file_type, b.original_file_name, b.file_size_bytes, b.status,
+              b.file_type, b.cover_mime_type, b.original_file_name,
+              b.file_size_bytes, b.status,
               b.review_note, b.created_at, u.id AS author_id,
               u.email AS author_email, u.display_name AS author_name
        FROM platform_books b
@@ -780,7 +1142,7 @@ export function createApiRouter({
     async (request, response) => {
       const id = z.coerce.number().int().positive().parse(request.params.id);
       const [books] = await pool.execute(
-        `SELECT storage_key, file_type, original_file_name
+        `SELECT file_type, original_file_name
          FROM platform_books WHERE id = ? LIMIT 1`,
         [id],
       );
@@ -789,28 +1151,37 @@ export function createApiRouter({
         throw new HttpError(404, 'BOOK_NOT_FOUND', 'Livre introuvable.');
       }
 
-      const filePath = path.join(
-        uploadsDirectory,
-        `${book.storage_key}${fileExtension(book.file_type)}`,
+      await deliverStoredFile(
+        pool,
+        response,
+        id,
+        'document',
+        book.file_type === 'pdf'
+          ? 'application/pdf'
+          : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        book.original_file_name,
       );
-      response.set({
-        'Content-Disposition': `attachment; filename="${path.basename(book.original_file_name).replace(/["\\\r\n]/g, '_')}"`,
-        'X-Content-Type-Options': 'nosniff',
-      });
-      const file = createReadStream(filePath);
-      file.on('error', (error) => {
-        if (!response.headersSent) {
-          response.status(404).json({
-            error: 'FILE_NOT_FOUND',
-            message: 'Le fichier privé est indisponible.',
-          });
-        } else {
-          response.destroy(error);
-        }
-      });
-      file.pipe(response);
     },
   );
+
+  router.delete('/admin/books/:id', auth, requireRole('admin'), async (request, response) => {
+    const id = z.coerce.number().int().positive().parse(request.params.id);
+    const [result] = await pool.execute(
+      `UPDATE platform_books SET status = 'archived'
+       WHERE id = ? AND status <> 'archived'`,
+      [id],
+    );
+    if (result.affectedRows === 0) {
+      const [books] = await pool.execute(
+        'SELECT id FROM platform_books WHERE id = ? LIMIT 1',
+        [id],
+      );
+      if (books.length === 0) {
+        throw new HttpError(404, 'BOOK_NOT_FOUND', 'Livre introuvable.');
+      }
+    }
+    response.json({ message: 'Livre retiré du catalogue.' });
+  });
 
   router.patch(
     '/admin/books/:id/review',
@@ -937,6 +1308,10 @@ export function createApp({
   privateFilesDirectory,
   fedapay = null,
   fedapayEnvironment = 'sandbox',
+  mailApiKey = '',
+  mailFromEmail = '',
+  mailFromName = 'Application Livre',
+  publicApiUrl = '',
 }) {
   if (!pool || typeof pool.execute !== 'function') {
     throw new TypeError('Une connexion MySQL est obligatoire.');
@@ -953,17 +1328,22 @@ export function createApp({
   app.use(helmet());
   app.use(cors({
     origin: corsOrigins.length ? corsOrigins : false,
-    methods: ['GET', 'POST', 'PATCH', 'PUT', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
     maxAge: 600,
   }));
   app.use(express.json({ limit: '32kb' }));
+  app.use(express.urlencoded({ extended: false, limit: '10kb' }));
   app.use('/api', createApiRouter({
     pool,
     jwtSecret,
     privateFilesDirectory,
     fedapay,
     fedapayEnvironment,
+    mailApiKey,
+    mailFromEmail,
+    mailFromName,
+    publicApiUrl,
   }));
 
   app.use(notFoundHandler);

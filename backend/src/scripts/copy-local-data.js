@@ -1,7 +1,16 @@
+import { createReadStream } from 'node:fs';
+import { access } from 'node:fs/promises';
+import path from 'node:path';
 import { runMigrations } from '../db/migrate.js';
 import { loadDatabaseConfig } from '../config.js';
 import { createPool } from '../db/pool.js';
 
+const fileChunkSize = 512 * 1024;
+const privateBooksDirectory = path.resolve(
+  process.cwd(),
+  process.env.PRIVATE_FILES_DIR || './private-storage',
+  'books',
+);
 const tables = [
   'platform_users',
   'platform_books',
@@ -76,7 +85,12 @@ async function copyTable(source, destination, connection, table) {
     VALUES (${placeholders})${settingsUpdate}`;
 
   for (const row of rows) {
-    const values = columns.map((column) => row[column]);
+    const values = columns.map((column) => {
+      if (table === 'platform_books' && column === 'status' && row.status === 'pending') {
+        return 'approved';
+      }
+      return row[column];
+    });
     const updates = table === 'platform_settings'
       ? columns
         .filter((column) => column !== 'setting_key')
@@ -86,6 +100,45 @@ async function copyTable(source, destination, connection, table) {
   }
 
   return rows.length;
+}
+
+async function copyBookFiles(source, connection) {
+  const [books] = await source.query(
+    'SELECT id, storage_key, file_type FROM platform_books ORDER BY id',
+  );
+  let copied = 0;
+  for (const book of books) {
+    const extension = book.file_type === 'pdf' ? '.pdf' : '.docx';
+    const filePath = path.join(
+      privateBooksDirectory,
+      `${book.storage_key}${extension}`,
+    );
+    try {
+      await access(filePath);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new Error(
+          `Le fichier local du livre ${book.id} est introuvable. Aucune donnée cloud n’a été copiée.`,
+        );
+      }
+      throw error;
+    }
+
+    let chunkIndex = 0;
+    for await (const chunk of createReadStream(filePath, {
+      highWaterMark: fileChunkSize,
+    })) {
+      await connection.execute(
+        `INSERT INTO platform_book_file_chunks
+          (book_id, file_kind, chunk_index, file_data)
+         VALUES (?, 'document', ?, ?)`,
+        [book.id, chunkIndex, chunk],
+      );
+      chunkIndex += 1;
+    }
+    copied += 1;
+  }
+  return copied;
 }
 
 async function main() {
@@ -105,11 +158,13 @@ async function main() {
     for (const table of tables) {
       copied[table] = await copyTable(source, destination, connection, table);
     }
+    copied.bookFiles = await copyBookFiles(source, connection);
     await connection.commit();
 
     console.info(
       `Migration terminée : ${copied.platform_users} comptes, `
       + `${copied.platform_books} livres, `
+      + `${copied.bookFiles} fichiers de livres, `
       + `${copied.platform_settings} paramètres et `
       + `${copied.platform_orders} commandes copiés.`,
     );
