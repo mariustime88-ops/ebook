@@ -69,6 +69,28 @@ test('FedaPay rejects non-HTTPS checkout links', async () => {
   );
 });
 
+test('FedaPay resolves the currency ID returned by its transaction API', async () => {
+  const requests = [];
+  const client = createFedaPayClient({
+    secretKey: 'sk_sandbox_test-secret',
+    fetchImpl: async (url) => {
+      requests.push(url);
+      const payload = url.endsWith('/transactions/42')
+        ? { transaction: { id: 42, amount: 1250, status: 'approved', currency_id: 1 } }
+        : { currency: { id: 1, iso: 'XOF' } };
+      return { ok: true, status: 200, json: async () => payload };
+    },
+  });
+
+  const transaction = await client.getTransaction(42);
+
+  assert.deepEqual(transaction.currency, { id: 1, iso: 'XOF' });
+  assert.deepEqual(requests, [
+    'https://sandbox-api.fedapay.com/v1/transactions/42',
+    'https://sandbox-api.fedapay.com/v1/currencies/1',
+  ]);
+});
+
 test('FedaPay refuses live mode to prevent real charges during sandbox testing', () => {
   assert.throws(
     () => createFedaPayClient({

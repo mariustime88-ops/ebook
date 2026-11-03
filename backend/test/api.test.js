@@ -208,6 +208,67 @@ test('book listing only returns approved catalogue entries', async (t) => {
     assert.equal((await response.json()).error, 'PAYMENT_NOT_CONFIGURED');
   });
 
+  test('checkout confirms an approved pending order instead of reopening its payment link', async (t) => {
+    const updates = [];
+    const app = await startServer(t, {
+      execute: async (sql, parameters) => {
+        if (sql.includes('FROM platform_users WHERE id = ? LIMIT 1')) {
+          return [[{
+            id: 9,
+            email: 'reader@example.test',
+            display_name: 'Lecteur test',
+            role: 'reader',
+            status: 'active',
+          }], []];
+        }
+        if (sql.includes('SELECT id, status, provider_reference, amount, currency FROM platform_orders')) {
+          return [[{
+            id: 19,
+            status: 'pending_payment',
+            provider_reference: 'transaction-19',
+            amount: '1000.00',
+            currency: 'XOF',
+          }], []];
+        }
+        if (sql.includes("SET status = 'paid'")) {
+          updates.push(parameters);
+          return [{ affectedRows: 1 }, []];
+        }
+        throw new Error(`Requête non prévue dans le test : ${sql}`);
+      },
+    }, {
+      fedapay: {
+        getTransaction: async () => ({
+          id: 'transaction-19',
+          status: 'approved',
+          amount: 1000,
+          currency: { iso: 'XOF' },
+          custom_metadata: { order_id: 19 },
+        }),
+        createPaymentUrl: async () => {
+          throw new Error('Une transaction approuvée ne doit pas être rouverte.');
+        },
+      },
+    });
+    const token = signAccessToken(9, jwtSecret);
+
+    const response = await fetch(`${app.baseUrl}/payments/checkout`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ bookId: 4 }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      orderId: 19,
+      alreadyPaid: true,
+    });
+    assert.deepEqual(updates, [[19, 9]]);
+  });
+
   test('checkout works without author payout details and stores the commission split', async (t) => {
     let insertedOrder;
     let checkoutInput;
@@ -222,7 +283,7 @@ test('book listing only returns approved catalogue entries', async (t) => {
             status: 'active',
           }], []];
         }
-        if (sql.includes('SELECT id, status, provider_reference FROM platform_orders')) {
+        if (sql.includes('SELECT id, status, provider_reference, amount, currency FROM platform_orders')) {
           return [[], []];
         }
         if (sql.includes("b.status = 'approved'")) {
@@ -305,7 +366,7 @@ test('book listing only returns approved catalogue entries', async (t) => {
             status: 'active',
           }], []];
         }
-        if (sql.includes('SELECT id, status, provider_reference FROM platform_orders')) {
+        if (sql.includes('SELECT id, status, provider_reference, amount, currency FROM platform_orders')) {
           return [[], []];
         }
         if (sql.includes("b.status = 'approved'")) {

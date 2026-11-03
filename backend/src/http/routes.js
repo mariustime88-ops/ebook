@@ -96,6 +96,22 @@ function parsePage(query) {
   };
 }
 
+function matchesFedaPayTransaction(transaction, order) {
+  const transactionCurrency = typeof transaction.currency === 'string'
+    ? transaction.currency
+    : transaction.currency?.iso;
+  const metadataOrderId = transaction.custom_metadata?.order_id
+    ?? transaction.metadata?.order_id;
+
+  return String(transaction.id) === String(order.provider_reference)
+    && Number(transaction.amount) === Number(order.amount)
+    && transactionCurrency === order.currency
+    && (
+      metadataOrderId === undefined
+      || String(metadataOrderId) === String(order.id)
+    );
+}
+
 async function removeIfExists(filePath) {
   try {
     await rm(filePath);
@@ -665,7 +681,7 @@ export function createApiRouter({
         }).parse(request.body);
 
         const [existingOrders] = await pool.execute(
-          `SELECT id, status, provider_reference FROM platform_orders
+          `SELECT id, status, provider_reference, amount, currency FROM platform_orders
            WHERE buyer_id = ? AND book_id = ?
              AND status IN ('paid', 'pending_payment')
            ORDER BY id DESC LIMIT 1`,
@@ -687,25 +703,63 @@ export function createApiRouter({
             );
           }
           try {
-            const paymentUrl = await fedapay.createPaymentUrl(
+            const transaction = await fedapay.getTransaction(
               existingOrders[0].provider_reference,
             );
-            response.json({
-              orderId: existingOrders[0].id,
-              alreadyPaid: false,
-              paymentUrl,
-              currency: 'XOF',
-              environment: fedapayEnvironment,
-            });
+            if (transaction.status === 'approved') {
+              if (!matchesFedaPayTransaction(transaction, existingOrders[0])) {
+                throw new HttpError(
+                  409,
+                  'PAYMENT_DETAILS_MISMATCH',
+                  'Les détails du paiement ne correspondent pas à cette commande.',
+                );
+              }
+              await pool.execute(
+                `UPDATE platform_orders
+                 SET status = 'paid', paid_at = CURRENT_TIMESTAMP
+                 WHERE id = ? AND buyer_id = ? AND status = 'pending_payment'`,
+                [existingOrders[0].id, request.user.id],
+              );
+              response.json({
+                orderId: existingOrders[0].id,
+                alreadyPaid: true,
+              });
+              return;
+            }
+            if (
+              transaction.status === 'declined'
+              || transaction.status === 'canceled'
+              || transaction.status === 'cancelled'
+              || transaction.status === 'refunded'
+            ) {
+              const status = transaction.status === 'refunded' ? 'refunded' : 'failed';
+              await pool.execute(
+                `UPDATE platform_orders SET status = ?
+                 WHERE id = ? AND buyer_id = ? AND status = 'pending_payment'`,
+                [status, existingOrders[0].id, request.user.id],
+              );
+            } else {
+              const paymentUrl = await fedapay.createPaymentUrl(
+                existingOrders[0].provider_reference,
+              );
+              response.json({
+                orderId: existingOrders[0].id,
+                alreadyPaid: false,
+                paymentUrl,
+                currency: 'XOF',
+                environment: fedapayEnvironment,
+              });
+              return;
+            }
           } catch (error) {
+            if (error instanceof HttpError) throw error;
             console.error(`Échec de récupération du paiement FedaPay : ${error.message}`);
             throw new HttpError(
               502,
               'PAYMENT_PROVIDER_ERROR',
-              'FedaPay n’a pas pu réouvrir le paiement. Réessayez plus tard.',
+              'FedaPay n’a pas pu vérifier ou réouvrir le paiement. Réessayez plus tard.',
             );
           }
-          return;
         }
 
         if (!fedapay) {
@@ -871,19 +925,10 @@ export function createApiRouter({
           );
         }
 
-        const transactionCurrency = typeof transaction.currency === 'string'
-          ? transaction.currency
-          : transaction.currency?.iso;
-        const metadataOrderId = transaction.custom_metadata?.order_id
-          ?? transaction.metadata?.order_id;
-        const isMatchingPayment = String(transaction.id) === String(order.provider_reference)
-          && Number(transaction.amount) === Number(order.amount)
-          && transactionCurrency === order.currency
-          && (
-            metadataOrderId === undefined
-            || String(metadataOrderId) === String(order.id)
-          );
-        if (transaction.status === 'approved' && isMatchingPayment) {
+        if (
+          transaction.status === 'approved'
+          && matchesFedaPayTransaction(transaction, order)
+        ) {
           await pool.execute(
             `UPDATE platform_orders
              SET status = 'paid', paid_at = CURRENT_TIMESTAMP

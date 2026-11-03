@@ -22,6 +22,8 @@ export function createFedaPayClient({
     throw new TypeError('La clé secrète FedaPay est obligatoire.');
   }
 
+  const currencyCache = new Map();
+
   async function request(resourcePath, options = {}) {
     let response;
     try {
@@ -49,6 +51,31 @@ export function createFedaPayClient({
       throw new Error(`Le service de paiement FedaPay a répondu ${response.status}.`);
     }
     return payload;
+  }
+
+  async function getCurrency(currencyId) {
+    const id = Number(currencyId);
+    if (!Number.isSafeInteger(id) || id < 1) {
+      throw new Error('FedaPay n’a pas retourné une devise valide.');
+    }
+
+    let currencyPromise = currencyCache.get(id);
+    if (!currencyPromise) {
+      currencyPromise = request(`/currencies/${id}`)
+        .then((payload) => {
+          const currency = resourceFrom(payload, 'currency');
+          if (typeof currency?.iso !== 'string') {
+            throw new Error('FedaPay n’a pas retourné le code de devise.');
+          }
+          return currency;
+        })
+        .catch((error) => {
+          currencyCache.delete(id);
+          throw error;
+        });
+      currencyCache.set(id, currencyPromise);
+    }
+    return currencyPromise;
   }
 
   async function createPaymentUrl(transactionId) {
@@ -112,7 +139,13 @@ export function createFedaPayClient({
       if (!transaction?.id) {
         throw new Error('FedaPay n’a pas retourné la transaction demandée.');
       }
-      return transaction;
+      if (transaction.currency || transaction.currency_id === undefined) {
+        return transaction;
+      }
+      return {
+        ...transaction,
+        currency: await getCurrency(transaction.currency_id),
+      };
     },
   };
 }
