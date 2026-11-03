@@ -593,8 +593,8 @@ export function createApiRouter({
          WHERE b.status = 'approved'
            AND (? = '' OR b.title LIKE ? OR u.display_name LIKE ?)
          ORDER BY b.created_at DESC
-         LIMIT ? OFFSET ?`,
-        [search, searchTerm, searchTerm, limit, offset],
+         LIMIT ${limit} OFFSET ${offset}`,
+        [search, searchTerm, searchTerm],
       ),
       pool.execute(
         `SELECT COUNT(*) AS total

@@ -130,6 +130,8 @@ test('book listing only returns approved catalogue entries', async (t) => {
       if (sql.includes('COUNT(*)')) {
         return [[{ total: 1 }], []];
       }
+      assert.match(sql, /LIMIT 10 OFFSET 20/);
+      assert.doesNotMatch(sql, /LIMIT\s+\?/);
       return [[{
         id: 4,
         title: 'Un livre validé',
@@ -142,10 +144,12 @@ test('book listing only returns approved catalogue entries', async (t) => {
     },
   });
 
-  const response = await fetch(`${app.baseUrl}/books`);
+  const response = await fetch(`${app.baseUrl}/books?page=3&limit=10`);
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.total, 1);
+  assert.equal(result.page, 3);
+  assert.equal(result.limit, 10);
   assert.equal(result.books[0].title, 'Un livre validé');
 });
 
