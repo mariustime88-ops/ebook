@@ -308,6 +308,24 @@ export function createApiRouter({
     legacyHeaders: false,
   });
 
+  router.get('/payments/return', (request, response) => {
+    const orderId = z.coerce.number().int().positive().safeParse(
+      request.query.orderId,
+    );
+    if (!orderId.success) {
+      throw new HttpError(
+        400,
+        'INVALID_PAYMENT_RETURN',
+        'Le numéro de commande du retour de paiement est invalide.',
+      );
+    }
+
+    response.redirect(
+      303,
+      `ebookpro://payment-return?orderId=${orderId.data}`,
+    );
+  });
+
   router.get('/health/live', (_request, response) => {
     response.json({ status: 'ok' });
   });
@@ -762,11 +780,16 @@ export function createApiRouter({
         let checkout;
         try {
           const [firstName, ...lastNameParts] = request.user.display_name.trim().split(/\s+/);
+          const callbackUrl = publicApiUrl
+            ? new URL('/api/payments/return', publicApiUrl)
+            : null;
+          callbackUrl?.searchParams.set('orderId', String(orderId));
           checkout = await fedapay.createCheckout({
             orderId,
             amount,
             currency: 'XOF',
             description: `Achat du livre : ${book.title}`,
+            ...(callbackUrl ? { callbackUrl: callbackUrl.toString() } : {}),
             customer: {
               email: request.user.email,
               firstname: firstName,

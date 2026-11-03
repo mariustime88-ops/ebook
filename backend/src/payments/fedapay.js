@@ -68,14 +68,25 @@ export function createFedaPayClient({
   }
 
   return {
-    async createCheckout({ orderId, amount, currency, description, customer }) {
+    async createCheckout({
+      orderId,
+      amount,
+      currency,
+      description,
+      customer,
+      callbackUrl: checkoutCallbackUrl,
+    }) {
       const transactionPayload = await request('/transactions', {
         method: 'POST',
         body: JSON.stringify({
           description,
           amount,
           currency: { iso: currency },
-          ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+          ...(
+            checkoutCallbackUrl || callbackUrl
+              ? { callback_url: checkoutCallbackUrl || callbackUrl }
+              : {}
+          ),
           custom_metadata: { order_id: orderId },
           customer,
         }),

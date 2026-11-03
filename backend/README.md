@@ -159,6 +159,13 @@ transaction attendue. Le fichier privé n’est téléchargeable qu’après cet
 confirmation. Le bac à sable ne débite pas d’argent réel. Si l’administrateur
 n’a pas défini de commission, le taux appliqué est 0 %.
 
+Après le checkout, FedaPay redirige vers `GET /api/payments/return`, qui renvoie
+l’application Android vers `ebookpro://payment-return?orderId=...`. L’application
+vérifie alors la commande auprès de l’API ; le lien de retour seul ne confirme
+jamais un paiement. Conservez l’URL publique HTTPS de l’API Render dans
+`PUBLIC_API_URL` (ou laissez Render fournir `RENDER_EXTERNAL_URL`) afin que
+chaque nouveau checkout reçoive le bon `callback_url`.
+
 La part auteur est calculée, mais les reversements restent manuels : aucun
 transfert automatique vers les auteurs n’est déclenché. Les webhooks, la production
 FedaPay, la lecture intégrée des fichiers et le DRM ne sont pas inclus dans
@@ -178,6 +185,7 @@ FedaPay pour les paiements et reversements.
 - `GET /api/books` — catalogue approuvé
 - `GET /api/books/:id/cover` — couverture publique
 - `POST /api/payments/checkout` — création ou reprise d’un checkout FedaPay
+- `GET /api/payments/return` — retour FedaPay vers l’application Android
 - `GET /api/payments/orders/:id` — vérification serveur de la transaction
 - `GET /api/purchases` et `GET /api/purchases/:bookId/file` — bibliothèque et
   téléchargement après achat confirmé

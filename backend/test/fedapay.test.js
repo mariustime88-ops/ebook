@@ -25,6 +25,7 @@ test('FedaPay sandbox creates a test transaction and returns a secure checkout U
     amount: 1250,
     currency: 'XOF',
     description: 'Livre de test',
+    callbackUrl: 'https://api.example.test/api/payments/return?orderId=7',
     customer: { email: 'lecteur@example.test' },
   });
 
@@ -35,6 +36,10 @@ test('FedaPay sandbox creates a test transaction and returns a secure checkout U
   assert.equal(requests[0].url, 'https://sandbox-api.fedapay.com/v1/transactions');
   assert.match(requests[0].options.headers.Authorization, /^Bearer sk_sandbox_/);
   const body = JSON.parse(requests[0].options.body);
+  assert.equal(
+    body.callback_url,
+    'https://api.example.test/api/payments/return?orderId=7',
+  );
   assert.equal(body.mode, undefined);
   assert.deepEqual(body.custom_metadata, { order_id: 7 });
   assert.equal(requests[1].url, 'https://sandbox-api.fedapay.com/v1/transactions/42/token');

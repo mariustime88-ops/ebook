@@ -76,6 +76,30 @@ test('health endpoint responds without querying the database', async (t) => {
   assert.deepEqual(await response.json(), { status: 'ok' });
 });
 
+test('payment return redirects to the app with a validated order ID', async (t) => {
+  const app = await startServer(t, {
+    execute: async () => {
+      throw new Error('Un retour de paiement ne doit pas interroger MySQL.');
+    },
+  });
+
+  const response = await fetch(
+    `${app.baseUrl}/payments/return?orderId=19`,
+    { redirect: 'manual' },
+  );
+  assert.equal(response.status, 303);
+  assert.equal(
+    response.headers.get('location'),
+    'ebookpro://payment-return?orderId=19',
+  );
+
+  const invalidResponse = await fetch(
+    `${app.baseUrl}/payments/return?orderId=invalid`,
+    { redirect: 'manual' },
+  );
+  assert.equal(invalidResponse.status, 400);
+});
+
 test('author-only routes reject unauthenticated requests', async (t) => {
   const app = await startServer(t, {
     execute: async () => {
@@ -236,6 +260,7 @@ test('book listing only returns approved catalogue entries', async (t) => {
         createPaymentUrl: async () => 'https://checkout.fedapay.com/test',
       },
       fedapayEnvironment: 'sandbox',
+      publicApiUrl: 'https://api.example.test',
     });
     const token = signAccessToken(9, jwtSecret);
 
@@ -260,6 +285,10 @@ test('book listing only returns approved catalogue entries', async (t) => {
     assert.deepEqual(insertedOrder, [9, 4, 1000, 200, 800, '20.00']);
     assert.equal(checkoutInput.orderId, 19);
     assert.equal(checkoutInput.currency, 'XOF');
+    assert.equal(
+      checkoutInput.callbackUrl,
+      'https://api.example.test/api/payments/return?orderId=19',
+    );
     assert.equal(checkoutInput.customer.email, 'reader@example.test');
   });
 
